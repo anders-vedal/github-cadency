@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # Auth
     jwt_secret: str = ""
     devpulse_initial_admin: str = ""
-    frontend_url: str = "http://localhost:5173"
+    frontend_url: str = "http://localhost:3001"
 
     # AI (optional — only needed for AI analysis)
     anthropic_api_key: str = ""
@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # Sync scheduling
     sync_interval_minutes: int = 15
     full_sync_cron_hour: int = 2
+
+    # DORA metrics
+    deploy_workflow_name: str = ""
+    deploy_environment: str = "production"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

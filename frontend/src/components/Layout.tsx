@@ -33,12 +33,17 @@ const adminNavItems: NavEntry[] = [
       { to: '/insights/benchmarks', label: 'Benchmarks' },
       { to: '/insights/issue-quality', label: 'Issue Quality' },
       { to: '/insights/code-churn', label: 'Code Churn' },
+      { to: '/insights/cicd', label: 'CI/CD' },
+      { to: '/insights/dora', label: 'DORA Metrics' },
+      { to: '/insights/investment', label: 'Investment' },
     ],
   },
   { to: '/repos', label: 'Repos' },
   { to: '/sync', label: 'Sync' },
   { to: '/ai', label: 'AI Analysis' },
+  { to: '/settings/ai', label: 'AI Settings' },
   { to: '/goals', label: 'Goals' },
+  { to: '/executive', label: 'Executive' },
 ]
 
 function NavDropdown({ group, pathname }: { group: NavGroup; pathname: string }) {

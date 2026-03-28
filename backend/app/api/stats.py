@@ -11,8 +11,11 @@ from app.schemas.schemas import (
     AppRole,
     AuthUser,
     BenchmarksResponse,
+    CIStatsResponse,
     CodeChurnResponse,
+    DORAMetricsResponse,
     CollaborationResponse,
+    CollaborationTrendsResponse,
     DeveloperStatsResponse,
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
@@ -24,13 +27,17 @@ from app.schemas.schemas import (
     RiskSummaryResponse,
     StalePRsResponse,
     TeamStatsResponse,
+    WorkAllocationResponse,
     WorkloadResponse,
 )
-from app.services.collaboration import get_collaboration
+from app.services.collaboration import get_collaboration, get_collaboration_trends
 from app.services.risk import get_pr_risk, get_risk_summary
+from app.services.work_category import get_work_allocation
 from app.services.stats import (
     get_benchmarks,
+    get_ci_stats,
     get_code_churn,
+    get_dora_metrics,
     get_developer_stats,
     get_developer_stats_with_percentiles,
     get_developer_trends,
@@ -140,6 +147,19 @@ async def collaboration(
     return await get_collaboration(db, team, date_from, date_to)
 
 
+@router.get(
+    "/stats/collaboration/trends", response_model=CollaborationTrendsResponse
+)
+async def collaboration_trends(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_collaboration_trends(db, team, date_from, date_to)
+
+
 @router.get("/stats/stale-prs", response_model=StalePRsResponse)
 async def stale_prs(
     team: str | None = Query(None),
@@ -243,3 +263,37 @@ async def code_churn(
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
     return await get_code_churn(db, repo_id, date_from, date_to, limit)
+
+
+@router.get("/stats/ci", response_model=CIStatsResponse)
+async def ci_stats(
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    repo_id: int | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_ci_stats(db, date_from, date_to, repo_id)
+
+
+@router.get("/stats/dora", response_model=DORAMetricsResponse)
+async def dora_metrics(
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    repo_id: int | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_dora_metrics(db, date_from, date_to, repo_id)
+
+
+@router.get("/stats/work-allocation", response_model=WorkAllocationResponse)
+async def work_allocation(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    use_ai: bool = Query(False),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_work_allocation(db, team, date_from, date_to, use_ai)

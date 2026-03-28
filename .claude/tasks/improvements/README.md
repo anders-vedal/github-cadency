@@ -16,6 +16,7 @@ Tasks are organized into 4 phases. Each task is self-contained and can be cherry
 | [P1-06](P1-06-frontend-polish.md) | Frontend Polish (Errors, Toasts, Skeletons) | — | Medium | **Done** |
 | [P1-07](P1-07-draft-pr-filtering.md) | Draft PR Filtering + Workload Fix | — | Small | **Done** |
 | [P1-08](P1-08-methodology-tooltips.md) | Methodology Tooltips | — | Small | **Done** |
+| [P1-09](P1-09-sync-page-ux.md) | Sync Page UX (Repos, Progress, Scope) | — | Medium | |
 
 ## Phase 2: "Make It Smart" (New Computations from Existing Data)
 
@@ -41,7 +42,7 @@ Tasks are organized into 4 phases. Each task is self-contained and can be cherry
 | [P3-04](P3-04-issue-creator-analytics.md) | Issue Creator Analytics (Mgmt Friction) | P3-03 | Medium | **Done** |
 | [P3-05](P3-05-pr-risk-scoring.md) | PR Risk Scoring | P2-05, P2-02 | Medium | **Done** |
 | [P3-06](P3-06-code-churn-analysis.md) | Code Churn Analysis (File-Level) | — | Large | **Done** |
-| [P3-07](P3-07-ci-check-runs.md) | CI/CD Check-Run Integration | — | Large | |
+| [P3-07](P3-07-ci-check-runs.md) | CI/CD Check-Run Integration | — | Large | **Done** |
 | [P3-08](P3-08-quarterly-report-export.md) | Quarterly Performance Report Export | — | Medium | |
 | [P3-09](P3-09-configurable-alert-thresholds.md) | Configurable Alert Thresholds | P3-01 | Small | |
 | [P3-10](P3-10-developer-work-notes.md) | Developer "Invisible Work" Notes | P1-01 | Small | |
@@ -50,11 +51,19 @@ Tasks are organized into 4 phases. Each task is self-contained and can be cherry
 
 | Task | Title | Dependencies | Effort | Status |
 |------|-------|-------------|--------|--------|
-| [P4-01](P4-01-dora-metrics.md) | DORA Metrics (Deploy Frequency + Lead Time) | P3-07 | Large | |
-| [P4-02](P4-02-work-categorization.md) | Work Categorization (Feature/Bug/Debt/Ops) | P2-05, P3-03 | Medium | |
-| [P4-03](P4-03-review-comment-categorization.md) | Review Comment Categorization | — | Medium | |
-| [P4-04](P4-04-executive-dashboard.md) | Executive Reporting Dashboard | P1-05, P2-08 | Large | |
+| [P4-01](P4-01-dora-metrics.md) | DORA Metrics (Deploy Frequency + Lead Time) | P3-07 | Large | **Done** |
+| [P4-02](P4-02-work-categorization.md) | Work Categorization (Feature/Bug/Debt/Ops) | P2-05, P3-03 | Medium | **Done** |
+| [P4-03](P4-03-review-comment-categorization.md) | Review Comment Categorization | — | Medium | **Done** |
+| [P4-04](P4-04-executive-dashboard.md) | Executive Reporting Dashboard | P1-05, P2-08 | Large | **Done** |
 | [P4-05](P4-05-bulk-one-on-one-prep.md) | Bulk 1:1 Prep Generation | P1-04 | Medium | |
+
+## Phase 5: "Operational Excellence" (Admin Controls & Cost Management)
+
+| Task | Title | Dependencies | Effort | Status |
+|------|-------|-------------|--------|--------|
+| [P5-01](P5-01-ai-settings-backend.md) | AI Settings & Cost Controls — Backend | — | Large | **Done** |
+| [P5-02](P5-02-ai-usage-tracking.md) | AI Usage Tracking & Cost Estimation API | P5-01 | Medium | **Done** |
+| [P5-03](P5-03-ai-settings-frontend.md) | AI Settings & Cost Controls — Frontend | P5-01, P5-02 | Large | **Done** |
 
 ## Quick Start Recommendations
 

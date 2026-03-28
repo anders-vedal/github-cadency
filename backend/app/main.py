@@ -4,12 +4,29 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 
 from app.api import ai_analysis, developers, goals, oauth, stats, sync, webhooks
 from app.config import settings
+from app.models.database import AsyncSessionLocal
+from app.models.models import SyncEvent
 from app.services.github_sync import run_sync
 
 logger = logging.getLogger(__name__)
+
+
+async def scheduled_sync(sync_type: str) -> None:
+    """Wrapper for scheduled sync jobs with concurrency check."""
+    async with AsyncSessionLocal() as db:
+        active = await db.execute(
+            select(SyncEvent).where(SyncEvent.status == "started")
+        )
+        if active.scalar_one_or_none():
+            logger.info(
+                "Skipping scheduled %s sync — another sync in progress", sync_type
+            )
+            return
+    await run_sync(sync_type)
 
 
 @asynccontextmanager
@@ -17,14 +34,14 @@ async def lifespan(app: FastAPI):
     # Startup — schedule sync jobs
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        run_sync,
+        scheduled_sync,
         "interval",
         args=["incremental"],
         minutes=settings.sync_interval_minutes,
         id="incremental_sync",
     )
     scheduler.add_job(
-        run_sync,
+        scheduled_sync,
         "cron",
         args=["full"],
         hour=settings.full_sync_cron_hour,

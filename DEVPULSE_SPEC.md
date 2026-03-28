@@ -159,20 +159,34 @@ DevPulse is an engineering intelligence dashboard that tracks developer activity
 | body | text | Stored for AI analysis |
 | created_at | timestamptz | |
 
-### 3.7 sync_events (operational log)
+### 3.7 sync_events (operational log with resumability)
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | serial PK | |
-| sync_type | varchar(30) | full, incremental, webhook |
-| status | varchar(20) | started, completed, failed |
-| repos_synced | integer | |
+| sync_type | varchar(30) | full, incremental |
+| status | varchar(30) | started, completed, completed_with_errors, failed |
+| repos_synced | integer | Count of repos successfully processed |
 | prs_upserted | integer | |
 | issues_upserted | integer | |
-| errors | jsonb | List of error messages |
+| errors | jsonb | List of structured error objects (see below) |
 | started_at | timestamptz | |
 | completed_at | timestamptz | |
 | duration_s | integer | |
+| repo_ids | jsonb | Specific repo IDs to sync (null = all tracked) |
+| since_override | timestamptz | Custom "since" date override |
+| total_repos | integer | Total repos in this sync run (for progress bar) |
+| current_repo_name | varchar(512) | Currently syncing repo (null when idle/done) |
+| repos_completed | jsonb | `[{repo_id, repo_name, status, prs, issues, warnings}]` |
+| repos_failed | jsonb | `[{repo_id, repo_name, error}]` |
+| is_resumable | boolean | True if sync can be resumed |
+| resumed_from_id | integer FK | Points to the original interrupted sync event |
+| log_summary | jsonb | Condensed log entries `[{ts, level, msg, repo?}]` (capped at 100) |
+| rate_limit_wait_s | integer | Total seconds spent waiting for GitHub rate limits |
+
+**Structured error objects:** Each entry in `errors` is `{repo, repo_id, step, error_type, status_code, message, retryable, timestamp, attempt}`. Errors classified as `github_api`, `auth`, `timeout`, or `unknown` with retryability flag.
+
+**Sync resilience:** Commits after each repo completes (per-repo durability). Batch commits every 50 PRs within large repos. On crash, `is_resumable=True` and resume picks up remaining repos. Retry with exponential backoff (2s, 8s, 30s) for transient HTTP errors (502/503/504) and timeouts.
 
 ### 3.8 ai_analyses (on-demand results)
 
@@ -217,19 +231,27 @@ Use a **GitHub App** installed on the organization. This provides:
 
 ### 4.2 Sync Strategy
 
+**Architecture:** `SyncContext` dataclass threads db session, HTTP client, sync event, and logger through the entire sync chain. Commits after each repo completes (per-repo durability) and every 50 PRs within large repos (batch commits). On crash, progress is preserved and sync is resumable.
+
 **Nightly full sync (2:00 AM):**
-1. Fetch all org repos via `GET /orgs/{org}/repos` (paginated)
+1. Fetch all org repos via `GET /orgs/{org}/repos` (paginated, with retry)
 2. For each tracked repo:
+   - Proactive rate limit check before starting
    - Fetch all PRs via `GET /repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc`
-   - For each PR, fetch reviews via `GET /repos/{owner}/{repo}/pulls/{number}/reviews`
-   - Fetch all issues via `GET /repos/{owner}/{repo}/issues?state=all` (skip items with `pull_request` key)
-   - Fetch issue comments via `GET /repos/{owner}/{repo}/issues/comments?sort=updated&direction=desc`
-3. Upsert all data. Log sync event.
+   - For each PR: fetch reviews, review comments, files, check runs
+   - Fetch all issues (skip items with `pull_request` key) + issue comments
+   - Sync repo tree and deployments (failures recorded as warnings, don't fail the repo)
+   - **Commit** after repo completes — progress is durable
+3. Set final status: `completed`, `completed_with_errors`, or `failed`. Log sync event with structured errors and log_summary.
 
 **Incremental sync (every 15 minutes):**
 - Same as full sync but filtered: only fetch items updated since `last_synced_at` on each repo.
 - Use `since` parameter on issues/comments endpoints.
 - Use `sort=updated&direction=desc` on PRs and stop pagination when you hit items older than `last_synced_at`.
+
+**Resume:** When a sync fails or completes with errors, `is_resumable=True`. `POST /sync/resume/{id}` creates a new sync with only the remaining (non-completed) repos.
+
+**Retry:** Transient HTTP errors (502/503/504) and timeouts are retried 3 times with exponential backoff (2s, 8s, 30s). Non-transient errors (401/403/404/422) fail immediately.
 
 **Webhooks (real-time):**
 - Events to subscribe to: `pull_request`, `pull_request_review`, `issues`, `issue_comment`
@@ -242,9 +264,10 @@ Use a **GitHub App** installed on the organization. This provides:
 
 ### 4.3 Rate Limit Handling
 
-- Check `X-RateLimit-Remaining` header on every response.
-- If remaining < 100, pause sync and wait until `X-RateLimit-Reset`.
-- Log rate limit events to sync_events table.
+- Check `X-RateLimit-Remaining` header on every response. Threshold: `< 200` remaining.
+- Proactive `/rate_limit` API check before each repo — sleep proactively if low.
+- If wait exceeds 5 minutes: commit current progress before sleeping (protects against process kill during wait).
+- Track total rate limit wait time on `sync_event.rate_limit_wait_s` for visibility.
 - The incremental sync should complete well within limits. The nightly full sync may take 20-40 minutes for 30 repos.
 
 ### 4.4 PR detail stats (additions/deletions)
@@ -294,12 +317,15 @@ All stats endpoints accept `?date_from=...&date_to=...` query params. Default: l
 ### 5.3 Sync Control
 
 ```
-POST   /api/sync/full                   Trigger full org sync manually
-POST   /api/sync/incremental            Trigger incremental sync manually
-GET    /api/sync/repos                  List all repos with tracking status
+POST   /api/sync/start                  Start configurable sync (accepts SyncTriggerRequest)
+POST   /api/sync/resume/{event_id}      Resume an interrupted sync (remaining repos only)
+GET    /api/sync/status                 Get active sync progress + summary stats
+GET    /api/sync/repos                  List all repos with tracking status + PR/issue counts
 PATCH  /api/sync/repos/{id}/track       Enable/disable tracking for a repo
-GET    /api/sync/events                 List recent sync events (operational log)
+GET    /api/sync/events                 List recent sync events with full progress details
 ```
+
+**Concurrency guard:** Returns `409 Conflict` if a sync is already running. Scheduler jobs also skip if an active sync exists.
 
 ### 5.4 Webhooks
 

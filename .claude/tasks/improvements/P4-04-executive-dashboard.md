@@ -4,13 +4,13 @@
 Phase 4 — Make It Best-in-Class
 
 ## Status
-pending
+completed
 
 ## Blocked By
-- P1-05-recharts-trend-viz
-- P2-08-workload-collaboration-pages
-- P3-02-sprint-model
-- P4-02-work-categorization
+- P1-05-recharts-trend-viz (completed)
+- P2-08-workload-collaboration-pages (completed)
+- ~~P3-02-sprint-model~~ (not implemented; sprints skipped by design)
+- P4-02-work-categorization (completed)
 
 ## Blocks
 None
@@ -24,42 +24,59 @@ Build a director/VP-level dashboard that shows team health at a strategic level:
 Route: `/executive` (admin-only)
 
 **Section 1: Team Velocity**
-- Line chart: PRs merged per week over the last 12 weeks
-- Line chart: Avg time to merge per week
-- Sprint-over-sprint velocity comparison (if sprints are configured)
-- Delta vs previous quarter
+- [x] Stacked bar chart: PRs merged per period by work category
+- [x] Stat cards: PRs merged, merge rate, avg time to merge, avg time to first review
+- [x] Delta vs previous same-duration period
+- ~~Sprint-over-sprint velocity comparison~~ — skipped (sprints not implemented)
 
 **Section 2: Investment Allocation**
-- Donut chart: feature vs bugfix vs tech-debt vs ops (from P4-02)
-- Stacked area chart: allocation trend over time (monthly)
-- Comparison to previous quarter
+- [x] Donut chart: feature vs bugfix vs tech-debt vs ops (from P4-02)
+- [x] Stacked bar chart: allocation trend over time
+- [x] Comparison to previous period via trend deltas
 
 **Section 3: Quality Indicators**
-- Revert rate trend (from P2-06)
-- Review quality score trend (team average)
-- PRs merged without review count
-- CI failure rate trend (from P3-07, if available)
+- [x] Revert rate with trend delta
+- [x] Reviews given count
+- [x] Issues closed count
+- [x] CI failure rate (from P3-07, when available)
 
 **Section 4: Team Health Summary**
-- Bus factor alerts (repos with single-reviewer dependency)
-- Silo alerts (teams not reviewing each other's code)
-- Workload distribution: is work spread evenly?
-- Developer growth: goals achieved this quarter
+- [x] Bus factor alerts (repos with single-reviewer dependency)
+- [x] Silo alerts (teams not reviewing each other's code)
+- [x] Workload distribution bar chart (low/balanced/high/overloaded)
+- [x] Collaboration health trend line chart (monthly bus factors, silos, isolated developers)
+- ~~Developer growth: goals achieved this quarter~~ — skipped (goals page already surfaces this)
 
 **Section 5: Risks**
-- High-risk PRs merged this period (from P3-05)
-- Developers with declining trends
-- Stale PR backlog size
+- [x] High-risk PRs table (from P3-05, level=high)
+- [x] Developers with declining trends (>30% PR drop or >20% review quality drop)
+- [x] Stale PR backlog count
 
 ### Backend
-No new backend endpoints needed — this page composes existing endpoints:
-- `GET /api/stats/team` (with current + previous quarter date ranges)
-- `GET /api/stats/workload`
-- `GET /api/stats/collaboration`
-- `GET /api/stats/benchmarks`
-- `GET /api/stats/work-allocation` (P4-02)
-- `GET /api/stats/risk-summary` (P3-05)
+- [x] `GET /api/stats/collaboration/trends` — new endpoint for monthly bus factor/silo/isolation counts (deviation from spec which said no new endpoints needed)
 
 ### Navigation
-- Add "Executive" as an admin-only nav item
-- Only visible when authenticated with admin token
+- [x] "Executive" as a top-level admin-only nav item
+- [x] Only visible when authenticated as admin
+
+## Deviations from Spec
+- **New backend endpoint added:** `GET /api/stats/collaboration/trends` was added to support the Team Health trend chart. The spec said no new endpoints, but server-side bucketing is more efficient than N frontend API calls.
+- **Sprint-related content skipped:** P3-02 (sprint model) was never implemented. All sprint references removed.
+- **"Developer growth" sub-section skipped:** Goals page already shows this. Added "declining developers" detection instead.
+- **Previous period comparison uses same-duration sliding window** instead of fixed quarterly comparison, matching the existing Dashboard pattern and the global date range picker.
+
+## Files Created
+- `frontend/src/pages/ExecutiveDashboard.tsx`
+- `backend/tests/integration/test_collaboration_trends_api.py`
+
+## Files Modified
+- `backend/app/schemas/schemas.py` — added `CollaborationTrendPeriod`, `CollaborationTrendsResponse`
+- `backend/app/services/collaboration.py` — added `get_collaboration_trends()`
+- `backend/app/api/stats.py` — added `/stats/collaboration/trends` route
+- `frontend/src/hooks/useStats.ts` — added `useCollaborationTrends` hook
+- `frontend/src/utils/types.ts` — added `CollaborationTrendPeriod`, `CollaborationTrendsResponse`
+- `frontend/src/App.tsx` — added route + import
+- `frontend/src/components/Layout.tsx` — added "Executive" nav item
+- `frontend/src/pages/insights/Investment.tsx` — removed invalid `TooltipProvider` import (pre-existing build fix)
+- `CLAUDE.md` — documented feature
+- `docs/API.md` — added endpoint reference

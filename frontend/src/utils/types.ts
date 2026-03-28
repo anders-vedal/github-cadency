@@ -116,9 +116,45 @@ export interface Repo {
   is_tracked: boolean
   last_synced_at: string | null
   created_at: string
+  pr_count: number
+  issue_count: number
 }
 
 // --- Sync ---
+
+export interface SyncRepoResult {
+  repo_id: number
+  repo_name: string
+  status: 'ok' | 'partial'
+  prs: number
+  issues: number
+  warnings: string[]
+}
+
+export interface SyncRepoFailure {
+  repo_id: number
+  repo_name: string
+  error: string
+}
+
+export interface SyncError {
+  repo: string | null
+  repo_id: number | null
+  step: string
+  error_type: string
+  status_code: number | null
+  message: string
+  retryable: boolean
+  timestamp: string
+  attempt: number
+}
+
+export interface SyncLogEntry {
+  ts: string
+  level: 'info' | 'warn' | 'error'
+  repo?: string
+  msg: string
+}
 
 export interface SyncEvent {
   id: number
@@ -127,11 +163,46 @@ export interface SyncEvent {
   repos_synced: number | null
   prs_upserted: number | null
   issues_upserted: number | null
-  errors: Record<string, unknown> | null
+  errors: SyncError[] | null
   started_at: string | null
   completed_at: string | null
   duration_s: number | null
+  repo_ids: number[] | null
+  since_override: string | null
+  total_repos: number | null
+  current_repo_name: string | null
+  repos_completed: SyncRepoResult[] | null
+  repos_failed: SyncRepoFailure[] | null
+  is_resumable: boolean
+  resumed_from_id: number | null
+  log_summary: SyncLogEntry[] | null
+  rate_limit_wait_s: number | null
 }
+
+export interface SyncStatusResponse {
+  active_sync: SyncEvent | null
+  last_completed: SyncEvent | null
+  tracked_repos_count: number
+  total_repos_count: number
+  last_successful_sync: string | null
+  last_sync_duration_s: number | null
+}
+
+export interface SyncStartRequest {
+  sync_type: 'full' | 'incremental'
+  repo_ids?: number[]
+  since?: string
+}
+
+export type TimeRangeOption =
+  | 'since_last'
+  | 'last_7d'
+  | 'last_14d'
+  | 'last_30d'
+  | 'last_60d'
+  | 'last_90d'
+  | 'custom'
+  | 'all'
 
 // --- AI Analysis ---
 
@@ -146,6 +217,10 @@ export interface AIAnalysis {
   result: Record<string, unknown> | null
   model_used: string | null
   tokens_used: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  estimated_cost_usd: number | null
+  reused: boolean
   triggered_by: string | null
   created_at: string
 }
@@ -441,6 +516,21 @@ export const riskLevelStyles: Record<RiskLevel, string> = {
   critical: 'bg-red-500/10 text-red-600',
 }
 
+// --- Collaboration Trends (P4-04) ---
+
+export interface CollaborationTrendPeriod {
+  period_start: string
+  period_end: string
+  period_label: string
+  bus_factor_count: number
+  silo_count: number
+  isolated_developer_count: number
+}
+
+export interface CollaborationTrendsResponse {
+  periods: CollaborationTrendPeriod[]
+}
+
 // --- Goals ---
 
 export interface GoalProgressPoint {
@@ -485,4 +575,174 @@ export interface CodeChurnResponse {
   total_files_in_repo: number
   total_files_changed: number
   tree_truncated: boolean
+}
+
+// --- CI/CD Check-Run Stats (P3-07) ---
+
+export interface FlakyCheck {
+  name: string
+  failure_rate: number
+  total_runs: number
+}
+
+export interface SlowestCheck {
+  name: string
+  avg_duration_s: number
+}
+
+export interface CIStatsResponse {
+  prs_merged_with_failing_checks: number
+  avg_checks_to_green: number | null
+  flaky_checks: FlakyCheck[]
+  avg_build_duration_s: number | null
+  slowest_checks: SlowestCheck[]
+}
+
+// --- DORA Metrics (P4-01) ---
+
+export interface DeploymentDetail {
+  id: number
+  repo_name: string | null
+  environment: string | null
+  sha: string | null
+  deployed_at: string | null
+  workflow_name: string | null
+  status: string | null
+  lead_time_hours: number | null
+}
+
+export interface DORAMetricsResponse {
+  deploy_frequency: number
+  deploy_frequency_band: string
+  avg_lead_time_hours: number | null
+  lead_time_band: string
+  total_deployments: number
+  period_days: number
+  deployments: DeploymentDetail[]
+}
+
+// --- Work Categorization (P4-02) ---
+
+export type WorkCategory = 'feature' | 'bugfix' | 'tech_debt' | 'ops' | 'unknown'
+
+export interface CategoryAllocation {
+  category: WorkCategory
+  count: number
+  additions: number
+  deletions: number
+  pct_of_total: number
+}
+
+export interface IssueCategoryAllocation {
+  category: WorkCategory
+  count: number
+  pct_of_total: number
+}
+
+export interface DeveloperWorkAllocation {
+  developer_id: number
+  github_username: string
+  display_name: string
+  team: string | null
+  pr_categories: Record<string, number>
+  issue_categories: Record<string, number>
+  total_prs: number
+  total_issues: number
+}
+
+export interface WorkAllocationPeriod {
+  period_start: string
+  period_end: string
+  period_label: string
+  pr_categories: Record<string, number>
+  issue_categories: Record<string, number>
+}
+
+export interface WorkAllocationResponse {
+  period_start: string
+  period_end: string
+  period_type: string
+  pr_allocation: CategoryAllocation[]
+  issue_allocation: IssueCategoryAllocation[]
+  developer_breakdown: DeveloperWorkAllocation[]
+  trend: WorkAllocationPeriod[]
+  unknown_pct: number
+  ai_classified_count: number
+  total_prs: number
+  total_issues: number
+}
+
+// --- AI Settings (P5) ---
+
+export interface AIFeatureStatus {
+  feature: string
+  enabled: boolean
+  label: string
+  description: string
+  disabled_impact: string
+  tokens_this_month: number
+  cost_this_month_usd: number
+  call_count_this_month: number
+  last_used_at: string | null
+}
+
+export interface AISettingsResponse {
+  ai_enabled: boolean
+  feature_general_analysis: boolean
+  feature_one_on_one_prep: boolean
+  feature_team_health: boolean
+  feature_work_categorization: boolean
+  monthly_token_budget: number | null
+  budget_warning_threshold: number
+  input_token_price_per_million: number
+  output_token_price_per_million: number
+  pricing_updated_at: string | null
+  cooldown_minutes: number
+  updated_at: string
+  updated_by: string | null
+  api_key_configured: boolean
+  current_month_tokens: number
+  current_month_cost_usd: number
+  budget_pct_used: number | null
+}
+
+export interface AISettingsUpdate {
+  ai_enabled?: boolean
+  feature_general_analysis?: boolean
+  feature_one_on_one_prep?: boolean
+  feature_team_health?: boolean
+  feature_work_categorization?: boolean
+  monthly_token_budget?: number | null
+  clear_budget?: boolean
+  budget_warning_threshold?: number
+  input_token_price_per_million?: number
+  output_token_price_per_million?: number
+  cooldown_minutes?: number
+}
+
+export interface DailyUsageEntry {
+  date: string
+  tokens: number
+  cost_usd: number
+  calls: number
+  by_feature: Record<string, { tokens: number; calls: number }>
+}
+
+export interface AIUsageSummary {
+  period_start: string
+  period_end: string
+  total_tokens: number
+  total_cost_usd: number
+  budget_limit: number | null
+  budget_pct_used: number | null
+  features: AIFeatureStatus[]
+  daily_usage: DailyUsageEntry[]
+}
+
+export interface AICostEstimate {
+  estimated_input_tokens: number
+  estimated_output_tokens: number
+  estimated_cost_usd: number
+  data_items: number
+  note: string
 }

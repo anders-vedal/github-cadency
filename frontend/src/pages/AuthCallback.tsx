@@ -7,9 +7,13 @@ export default function AuthCallback() {
 
   useEffect(() => {
     const token = searchParams.get('token')
+    const code = searchParams.get('code')
     if (token) {
       localStorage.setItem('devpulse_token', token)
       navigate('/', { replace: true })
+    } else if (code) {
+      // GitHub redirected here with an OAuth code — forward to backend for token exchange
+      window.location.href = `/api/auth/callback?code=${encodeURIComponent(code)}`
     } else {
       navigate('/login', { replace: true })
     }

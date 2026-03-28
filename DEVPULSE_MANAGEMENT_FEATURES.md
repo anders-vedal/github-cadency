@@ -171,8 +171,8 @@ ALTER TABLE pr_reviews ADD COLUMN quality_tier varchar(20) DEFAULT 'minimal';
 ```
 
 **Quality tier rules (computed on upsert, no AI needed):**
-- `thorough`: body > 500 chars, or 3+ inline review comments, or CHANGES_REQUESTED with body > 100 chars
-- `standard`: body 100-500 chars, or CHANGES_REQUESTED (any length), or body contains code blocks
+- `thorough`: body > 500 chars, or 3+ inline review comments, or CHANGES_REQUESTED with body > 100 chars, or 3+ architectural comments
+- `standard`: body 100-500 chars, or CHANGES_REQUESTED (any length), or body contains code blocks, or has blocker comment
 - `rubber_stamp`: state=APPROVED with body < 20 chars and 0 inline comments
 - `minimal`: everything else
 
@@ -191,6 +191,24 @@ ALTER TABLE pr_reviews ADD COLUMN quality_tier varchar(20) DEFAULT 'minimal';
 ```
 
 **Review quality score formula:** `(rubber_stamp * 0 + minimal * 1 + standard * 3 + thorough * 5) / total_reviews`. Normalized to 0-10 scale.
+
+**Comment type categorization (P4-03):** Each inline review comment is classified at sync time into one of 7 types: `nit`, `blocker`, `architectural`, `question`, `praise`, `suggestion`, `general`. Classification uses keyword/prefix detection (e.g., "nit:" prefix → nit, "security issue" content → blocker, GitHub ` ```suggestion` blocks → suggestion). Priority ordering ensures explicit prefixes win over loose patterns (e.g., "nit: why?" → nit, not question).
+
+Comment types feed back into quality tier classification:
+- Reviews with a `blocker` comment → minimum `standard` tier
+- Reviews with 3+ `architectural` comments → `thorough` tier regardless of body length
+
+**Comment type stats** added to `DeveloperStats`:
+```json
+{
+  "comment_type_distribution": {"nit": 8, "blocker": 2, "suggestion": 5, ...},
+  "nit_ratio": 0.23,
+  "blocker_catch_rate": 0.125
+}
+```
+
+- `nit_ratio` — fraction of all comments that are nits (high ratio may indicate over-focus on style)
+- `blocker_catch_rate` — fraction of reviews containing ≥1 blocker comment
 
 **AI enhancement (on-demand):** When a manager triggers AI analysis for a developer, the AI module can additionally assess the *content* of their reviews — are they catching real issues, suggesting improvements, or just nitpicking style? This requires reading the actual review text and is expensive, so it only runs when explicitly requested.
 

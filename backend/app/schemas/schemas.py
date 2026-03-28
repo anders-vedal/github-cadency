@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -154,6 +154,9 @@ class DeveloperStatsResponse(BaseModel):
     self_merge_rate: float | None = None
     prs_reverted: int = 0
     reverts_authored: int = 0
+    comment_type_distribution: dict[str, int] = {}
+    nit_ratio: float | None = None
+    blocker_catch_rate: float | None = None
 
 
 class TopContributor(BaseModel):
@@ -406,6 +409,19 @@ class CollaborationResponse(BaseModel):
     insights: CollaborationInsights
 
 
+class CollaborationTrendPeriod(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    period_label: str
+    bus_factor_count: int
+    silo_count: int
+    isolated_developer_count: int
+
+
+class CollaborationTrendsResponse(BaseModel):
+    periods: list[CollaborationTrendPeriod]
+
+
 # --- Goals schemas (M6) ---
 
 
@@ -501,10 +517,18 @@ class RepoResponse(BaseModel):
     is_tracked: bool
     last_synced_at: datetime | None
     created_at: datetime
+    pr_count: int = 0
+    issue_count: int = 0
 
 
 class RepoTrackUpdate(BaseModel):
     is_tracked: bool
+
+
+class SyncTriggerRequest(BaseModel):
+    sync_type: Literal["full", "incremental"] = "incremental"
+    repo_ids: list[int] | None = None
+    since: datetime | None = None
 
 
 class SyncEventResponse(BaseModel):
@@ -516,10 +540,29 @@ class SyncEventResponse(BaseModel):
     repos_synced: int | None
     prs_upserted: int | None
     issues_upserted: int | None
-    errors: dict | None
+    errors: list[Any] | None
     started_at: datetime | None
     completed_at: datetime | None
     duration_s: int | None
+    repo_ids: list[int] | None = None
+    since_override: datetime | None = None
+    total_repos: int | None = None
+    current_repo_name: str | None = None
+    repos_completed: list[dict] | None = None
+    repos_failed: list[dict] | None = None
+    is_resumable: bool = False
+    resumed_from_id: int | None = None
+    log_summary: list[dict] | None = None
+    rate_limit_wait_s: int = 0
+
+
+class SyncStatusResponse(BaseModel):
+    active_sync: SyncEventResponse | None = None
+    last_completed: SyncEventResponse | None = None
+    tracked_repos_count: int = 0
+    total_repos_count: int = 0
+    last_successful_sync: datetime | None = None
+    last_sync_duration_s: int | None = None
 
 
 # --- AI Analysis schemas ---
@@ -546,6 +589,10 @@ class AIAnalysisResponse(BaseModel):
     result: dict | None
     model_used: str | None
     tokens_used: int | None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    reused: bool = False
     triggered_by: str | None
     created_at: datetime
 
@@ -596,3 +643,178 @@ class RiskSummaryResponse(BaseModel):
     total_scored: int
     avg_risk_score: float
     prs_by_level: dict[str, int]
+
+
+# --- CI/CD Check-Run schemas (P3-07) ---
+
+
+class FlakyCheck(BaseModel):
+    name: str
+    failure_rate: float
+    total_runs: int
+
+
+class SlowestCheck(BaseModel):
+    name: str
+    avg_duration_s: float
+
+
+class CIStatsResponse(BaseModel):
+    prs_merged_with_failing_checks: int = 0
+    avg_checks_to_green: float | None = None
+    flaky_checks: list[FlakyCheck] = []
+    avg_build_duration_s: float | None = None
+    slowest_checks: list[SlowestCheck] = []
+
+
+# --- DORA Metrics schemas (P4-01) ---
+
+
+class DeploymentDetail(BaseModel):
+    id: int
+    repo_name: str | None = None
+    environment: str | None = None
+    sha: str | None = None
+    deployed_at: datetime | None = None
+    workflow_name: str | None = None
+    status: str | None = None
+    lead_time_hours: float | None = None
+
+
+class DORAMetricsResponse(BaseModel):
+    deploy_frequency: float = 0.0
+    deploy_frequency_band: str = "low"
+    avg_lead_time_hours: float | None = None
+    lead_time_band: str = "low"
+    total_deployments: int = 0
+    period_days: int = 0
+    deployments: list[DeploymentDetail] = []
+
+
+# --- Work Categorization schemas (P4-02) ---
+
+
+class CategoryAllocation(BaseModel):
+    category: str
+    count: int = 0
+    additions: int = 0
+    deletions: int = 0
+    pct_of_total: float = 0.0
+
+
+class IssueCategoryAllocation(BaseModel):
+    category: str
+    count: int = 0
+    pct_of_total: float = 0.0
+
+
+class DeveloperWorkAllocation(BaseModel):
+    developer_id: int
+    github_username: str
+    display_name: str
+    team: str | None = None
+    pr_categories: dict[str, int] = {}
+    issue_categories: dict[str, int] = {}
+    total_prs: int = 0
+    total_issues: int = 0
+
+
+class WorkAllocationPeriod(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    period_label: str
+    pr_categories: dict[str, int] = {}
+    issue_categories: dict[str, int] = {}
+
+
+class WorkAllocationResponse(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    period_type: str
+    pr_allocation: list[CategoryAllocation]
+    issue_allocation: list[IssueCategoryAllocation]
+    developer_breakdown: list[DeveloperWorkAllocation]
+    trend: list[WorkAllocationPeriod]
+    unknown_pct: float = 0.0
+    ai_classified_count: int = 0
+    total_prs: int = 0
+    total_issues: int = 0
+
+
+# --- AI Settings schemas (P5) ---
+
+
+class AISettingsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    ai_enabled: bool
+    feature_general_analysis: bool
+    feature_one_on_one_prep: bool
+    feature_team_health: bool
+    feature_work_categorization: bool
+    monthly_token_budget: int | None
+    budget_warning_threshold: float
+    input_token_price_per_million: float
+    output_token_price_per_million: float
+    pricing_updated_at: datetime | None
+    cooldown_minutes: int
+    updated_at: datetime
+    updated_by: str | None
+    # Computed fields populated by service
+    api_key_configured: bool = False
+    current_month_tokens: int = 0
+    current_month_cost_usd: float = 0.0
+    budget_pct_used: float | None = None
+
+
+class AISettingsUpdate(BaseModel):
+    ai_enabled: bool | None = None
+    feature_general_analysis: bool | None = None
+    feature_one_on_one_prep: bool | None = None
+    feature_team_health: bool | None = None
+    feature_work_categorization: bool | None = None
+    monthly_token_budget: int | None = None
+    clear_budget: bool = False  # set True to clear budget (set to None)
+    budget_warning_threshold: float | None = None
+    input_token_price_per_million: float | None = None
+    output_token_price_per_million: float | None = None
+    cooldown_minutes: int | None = None
+
+
+class AIFeatureStatus(BaseModel):
+    feature: str
+    enabled: bool
+    label: str
+    description: str
+    disabled_impact: str
+    tokens_this_month: int = 0
+    cost_this_month_usd: float = 0.0
+    call_count_this_month: int = 0
+    last_used_at: datetime | None = None
+
+
+class DailyUsage(BaseModel):
+    date: str
+    tokens: int = 0
+    cost_usd: float = 0.0
+    calls: int = 0
+    by_feature: dict[str, dict] = {}
+
+
+class AIUsageSummary(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    total_tokens: int = 0
+    total_cost_usd: float = 0.0
+    budget_limit: int | None = None
+    budget_pct_used: float | None = None
+    features: list[AIFeatureStatus] = []
+    daily_usage: list[DailyUsage] = []
+
+
+class AICostEstimate(BaseModel):
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    data_items: int = 0
+    note: str = ""

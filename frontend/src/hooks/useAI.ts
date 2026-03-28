@@ -21,47 +21,50 @@ export function useAIAnalysis(id: number) {
 export function useRunAnalysis() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: AIAnalyzeRequest) =>
-      apiFetch<AIAnalysis>('/ai/analyze', {
+    mutationFn: ({ data, force }: { data: AIAnalyzeRequest; force?: boolean }) =>
+      apiFetch<AIAnalysis>(`/ai/analyze${force ? '?force=true' : ''}`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['ai-history'] })
-      toast.success('Analysis started')
+      toast.success(result.reused ? 'Showing cached result' : 'Analysis complete')
     },
-    onError: () => toast.error('Analysis failed'),
+    onError: (err: Error) =>
+      toast.error(err.message?.includes('429') ? 'Monthly AI budget exceeded' : 'Analysis failed'),
   })
 }
 
 export function useRunOneOnOnePrep() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: OneOnOnePrepRequest) =>
-      apiFetch<AIAnalysis>('/ai/one-on-one-prep', {
+    mutationFn: ({ data, force }: { data: OneOnOnePrepRequest; force?: boolean }) =>
+      apiFetch<AIAnalysis>(`/ai/one-on-one-prep${force ? '?force=true' : ''}`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['ai-history'] })
-      toast.success('1:1 prep brief generated')
+      toast.success(result.reused ? 'Showing cached result' : '1:1 prep brief generated')
     },
-    onError: () => toast.error('Failed to generate 1:1 prep'),
+    onError: (err: Error) =>
+      toast.error(err.message?.includes('429') ? 'Monthly AI budget exceeded' : 'Failed to generate 1:1 prep'),
   })
 }
 
 export function useRunTeamHealth() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: TeamHealthRequest) =>
-      apiFetch<AIAnalysis>('/ai/team-health', {
+    mutationFn: ({ data, force }: { data: TeamHealthRequest; force?: boolean }) =>
+      apiFetch<AIAnalysis>(`/ai/team-health${force ? '?force=true' : ''}`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['ai-history'] })
-      toast.success('Team health check generated')
+      toast.success(result.reused ? 'Showing cached result' : 'Team health check generated')
     },
-    onError: () => toast.error('Failed to generate team health check'),
+    onError: (err: Error) =>
+      toast.error(err.message?.includes('429') ? 'Monthly AI budget exceeded' : 'Failed to generate team health check'),
   })
 }

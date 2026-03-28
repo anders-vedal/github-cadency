@@ -25,6 +25,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://devpulse:devpulse@db:5432/devpulse
     volumes:
       - ./backend:/app
+      - ./github-app.pem:/app/github-app.pem:ro
     depends_on:
       db:
         condition: service_healthy
@@ -35,6 +36,7 @@ services:
       - "3001:5173"
     environment:
       - CI=true
+      - API_URL=http://backend:8000
     volumes:
       - ./frontend:/app
       - /app/node_modules

@@ -432,9 +432,11 @@ export default function DeveloperDetail() {
                       onClick={() => {
                         runOneOnOnePrep.mutate(
                           {
-                            developer_id: devId,
-                            date_from: new Date(dateFrom).toISOString(),
-                            date_to: new Date(dateTo).toISOString(),
+                            data: {
+                              developer_id: devId,
+                              date_from: new Date(dateFrom).toISOString(),
+                              date_to: new Date(dateTo).toISOString(),
+                            },
                           },
                           { onSuccess: () => setPrepOpen(false) }
                         )
@@ -480,11 +482,13 @@ export default function DeveloperDetail() {
                       onClick={() => {
                         runAnalysis.mutate(
                           {
-                            analysis_type: analysisType,
-                            scope_type: 'developer',
-                            scope_id: String(devId),
-                            date_from: dateFrom,
-                            date_to: dateTo,
+                            data: {
+                              analysis_type: analysisType,
+                              scope_type: 'developer',
+                              scope_id: String(devId),
+                              date_from: dateFrom,
+                              date_to: dateTo,
+                            },
                           },
                           { onSuccess: () => setAnalyzeOpen(false) }
                         )

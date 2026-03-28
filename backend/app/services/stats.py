@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import Developer, Issue, IssueComment, PRFile, PRReview, PullRequest, RepoTreeFile, Repository
+from app.models.models import Deployment, Developer, Issue, IssueComment, PRCheckRun, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
 from app.schemas.schemas import (
     BenchmarkMetric,
     BenchmarksResponse,
@@ -26,8 +26,13 @@ from app.schemas.schemas import (
     TopContributor,
     TrendDirection,
     TrendPeriod,
+    CIStatsResponse,
     CodeChurnResponse,
+    DORAMetricsResponse,
+    DeploymentDetail,
     FileChurnEntry,
+    FlakyCheck,
+    SlowestCheck,
     StaleDirectory,
     WorkloadAlert,
     WorkloadResponse,
@@ -173,6 +178,45 @@ async def get_developer_stats(
         review_quality_score = round(raw_score * 2, 2)
     else:
         review_quality_score = None
+
+    # Comment type distribution (as reviewer)
+    comment_type_rows = (
+        await db.execute(
+            select(PRReviewComment.comment_type, func.count())
+            .join(PRReview, PRReviewComment.review_id == PRReview.id)
+            .where(
+                PRReview.reviewer_id == developer_id,
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+            )
+            .group_by(PRReviewComment.comment_type)
+        )
+    ).all()
+    comment_type_distribution = {ct: count for ct, count in comment_type_rows if ct}
+    total_typed_comments = sum(comment_type_distribution.values())
+    nit_ratio = (
+        round(comment_type_distribution.get("nit", 0) / total_typed_comments, 4)
+        if total_typed_comments > 0 else None
+    )
+
+    # Blocker catch rate: reviews with ≥1 blocker comment / total reviews given
+    total_reviews_given = (
+        reviews_given.approved + reviews_given.changes_requested + reviews_given.commented
+    )
+    if total_reviews_given > 0:
+        reviews_with_blocker = await db.scalar(
+            select(func.count(func.distinct(PRReviewComment.review_id)))
+            .join(PRReview, PRReviewComment.review_id == PRReview.id)
+            .where(
+                PRReview.reviewer_id == developer_id,
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+                PRReviewComment.comment_type == "blocker",
+            )
+        ) or 0
+        blocker_catch_rate = round(reviews_with_blocker / total_reviews_given, 4)
+    else:
+        blocker_catch_rate = None
 
     # Reviews received
     reviews_received = await db.scalar(
@@ -363,6 +407,9 @@ async def get_developer_stats(
         self_merge_rate=round(self_merge_rate, 4) if self_merge_rate is not None else None,
         prs_reverted=prs_reverted,
         reverts_authored=reverts_authored,
+        comment_type_distribution=comment_type_distribution,
+        nit_ratio=nit_ratio,
+        blocker_catch_rate=blocker_catch_rate,
     )
 
 
@@ -2250,4 +2297,237 @@ async def get_code_churn(
         total_files_in_repo=total_files_in_repo,
         total_files_changed=total_files_changed,
         tree_truncated=tree_truncated,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CI/CD Check-Run Stats (P3-07)
+# ---------------------------------------------------------------------------
+
+
+async def get_ci_stats(
+    db: AsyncSession,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    repo_id: int | None = None,
+) -> CIStatsResponse:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    # Base condition: PRs in date range, optionally filtered by repo
+    pr_conditions = [
+        PullRequest.created_at >= date_from,
+        PullRequest.created_at <= date_to,
+    ]
+    if repo_id is not None:
+        pr_conditions.append(PullRequest.repo_id == repo_id)
+
+    # --- PRs merged with failing checks ---
+    # Subquery: PR IDs that have at least one failing check run
+    prs_with_failure = (
+        select(PRCheckRun.pr_id)
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(
+            *pr_conditions,
+            PullRequest.is_merged.is_(True),
+            PRCheckRun.conclusion == "failure",
+        )
+        .group_by(PRCheckRun.pr_id)
+        .subquery()
+    )
+    prs_merged_with_failing = await db.scalar(
+        select(func.count()).select_from(prs_with_failure)
+    ) or 0
+
+    # --- Avg checks to green ---
+    # For each (pr, check_name), find the max run_attempt where conclusion=success.
+    # This tells us how many attempts it took to get green.
+    max_attempt_to_green = (
+        select(
+            PRCheckRun.pr_id,
+            PRCheckRun.check_name,
+            func.max(PRCheckRun.run_attempt).label("attempts"),
+        )
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(
+            *pr_conditions,
+            PRCheckRun.conclusion == "success",
+        )
+        .group_by(PRCheckRun.pr_id, PRCheckRun.check_name)
+        .subquery()
+    )
+    avg_to_green = await db.scalar(
+        select(func.avg(max_attempt_to_green.c.attempts))
+    )
+    avg_checks_to_green = round(float(avg_to_green), 2) if avg_to_green else None
+
+    # --- Flaky checks (>10% failure rate) ---
+    check_stats_q = (
+        select(
+            PRCheckRun.check_name,
+            func.count().label("total_runs"),
+            func.sum(
+                case((PRCheckRun.conclusion == "failure", 1), else_=0)
+            ).label("failures"),
+        )
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(*pr_conditions)
+        .group_by(PRCheckRun.check_name)
+        .having(func.count() >= 5)  # need a minimum sample
+    )
+    check_stats_rows = (await db.execute(check_stats_q)).all()
+
+    flaky_checks: list[FlakyCheck] = []
+    for name, total, failures in check_stats_rows:
+        rate = failures / total if total else 0
+        if rate > 0.1:
+            flaky_checks.append(
+                FlakyCheck(
+                    name=name,
+                    failure_rate=round(rate, 3),
+                    total_runs=total,
+                )
+            )
+    flaky_checks.sort(key=lambda c: c.failure_rate, reverse=True)
+
+    # --- Avg build duration ---
+    avg_dur = await db.scalar(
+        select(func.avg(PRCheckRun.duration_s))
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(*pr_conditions, PRCheckRun.duration_s.isnot(None))
+    )
+    avg_build_duration_s = round(float(avg_dur), 1) if avg_dur else None
+
+    # --- Slowest checks (top 5 by avg duration) ---
+    slowest_q = (
+        select(
+            PRCheckRun.check_name,
+            func.avg(PRCheckRun.duration_s).label("avg_dur"),
+        )
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(*pr_conditions, PRCheckRun.duration_s.isnot(None))
+        .group_by(PRCheckRun.check_name)
+        .order_by(func.avg(PRCheckRun.duration_s).desc())
+        .limit(5)
+    )
+    slowest_rows = (await db.execute(slowest_q)).all()
+    slowest_checks = [
+        SlowestCheck(name=name, avg_duration_s=round(float(avg_d), 1))
+        for name, avg_d in slowest_rows
+    ]
+
+    return CIStatsResponse(
+        prs_merged_with_failing_checks=prs_merged_with_failing,
+        avg_checks_to_green=avg_checks_to_green,
+        flaky_checks=flaky_checks,
+        avg_build_duration_s=avg_build_duration_s,
+        slowest_checks=slowest_checks,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DORA Metrics (P4-01)
+# ---------------------------------------------------------------------------
+
+
+def _deploy_frequency_band(deploys_per_day: float) -> str:
+    """Classify deploy frequency per DORA benchmarks."""
+    if deploys_per_day > 1.0:
+        return "elite"
+    if deploys_per_day >= 1.0 / 7:
+        return "high"
+    if deploys_per_day >= 1.0 / 30:
+        return "medium"
+    return "low"
+
+
+def _lead_time_band(hours: float) -> str:
+    """Classify change lead time per DORA benchmarks."""
+    if hours < 1.0:
+        return "elite"
+    if hours < 24.0:
+        return "high"
+    if hours < 168.0:  # 7 days
+        return "medium"
+    return "low"
+
+
+async def get_dora_metrics(
+    db: AsyncSession,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    repo_id: int | None = None,
+) -> DORAMetricsResponse:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    conditions = [
+        Deployment.deployed_at >= date_from,
+        Deployment.deployed_at <= date_to,
+    ]
+    if repo_id is not None:
+        conditions.append(Deployment.repo_id == repo_id)
+
+    # Total deployments in period
+    total = await db.scalar(
+        select(func.count()).select_from(
+            select(Deployment.id).where(
+                *conditions, Deployment.status == "success"
+            ).subquery()
+        )
+    ) or 0
+
+    period_days = max((date_to - date_from).days, 1)
+    deploy_frequency = round(total / period_days, 3)
+
+    # Average lead time
+    avg_lt = await db.scalar(
+        select(func.avg(Deployment.lead_time_s)).where(
+            *conditions,
+            Deployment.status == "success",
+            Deployment.lead_time_s.isnot(None),
+        )
+    )
+    avg_lead_time_hours = round(float(avg_lt) / 3600, 2) if avg_lt else None
+
+    # Recent deployments (last 20)
+    dep_rows = (
+        await db.execute(
+            select(
+                Deployment.id,
+                Deployment.environment,
+                Deployment.sha,
+                Deployment.deployed_at,
+                Deployment.workflow_name,
+                Deployment.status,
+                Deployment.lead_time_s,
+                Repository.full_name,
+            )
+            .join(Repository, Deployment.repo_id == Repository.id)
+            .where(*conditions, Deployment.status == "success")
+            .order_by(Deployment.deployed_at.desc())
+            .limit(20)
+        )
+    ).all()
+
+    deployments = [
+        DeploymentDetail(
+            id=row[0],
+            environment=row[1],
+            sha=row[2],
+            deployed_at=row[3],
+            workflow_name=row[4],
+            status=row[5],
+            lead_time_hours=round(float(row[6]) / 3600, 2) if row[6] else None,
+            repo_name=row[7],
+        )
+        for row in dep_rows
+    ]
+
+    return DORAMetricsResponse(
+        deploy_frequency=deploy_frequency,
+        deploy_frequency_band=_deploy_frequency_band(deploy_frequency),
+        avg_lead_time_hours=avg_lead_time_hours,
+        lead_time_band=_lead_time_band(avg_lead_time_hours) if avg_lead_time_hours is not None else "low",
+        total_deployments=total,
+        period_days=period_days,
+        deployments=deployments,
     )

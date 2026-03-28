@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useAIHistory, useRunAnalysis, useRunOneOnOnePrep, useRunTeamHealth } from '@/hooks/useAI'
+import { useAISettings, useAICostEstimate } from '@/hooks/useAISettings'
 import { useDevelopers } from '@/hooks/useDevelopers'
 import { useRepos } from '@/hooks/useSync'
 import { useDateRange } from '@/hooks/useDateRange'
@@ -25,15 +27,85 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Skeleton } from '@/components/ui/skeleton'
 import AnalysisResultRenderer from '@/components/ai/AnalysisResultRenderer'
+import { AlertTriangle, Info, RefreshCw } from 'lucide-react'
 import type { AIAnalyzeRequest, AIAnalysis as AIAnalysisType } from '@/utils/types'
+
+function timeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(ms / 60_000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+function ReusedBanner({ analysis, onRegenerate, isPending }: {
+  analysis: AIAnalysisType
+  onRegenerate: () => void
+  isPending: boolean
+}) {
+  if (!analysis.reused) return null
+  return (
+    <div className="mb-3 flex items-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-sm">
+      <Info className="h-4 w-4 shrink-0 text-blue-600" />
+      <span className="text-blue-700 dark:text-blue-400">
+        Showing cached result from {timeAgo(analysis.created_at)}.
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="ml-auto h-7 gap-1 text-xs"
+        disabled={isPending}
+        onClick={onRegenerate}
+      >
+        <RefreshCw className="h-3 w-3" />
+        Regenerate
+      </Button>
+    </div>
+  )
+}
+
+function CostEstimateLine({ feature, scopeType, scopeId, dateFrom, dateTo }: {
+  feature: string
+  scopeType?: string
+  scopeId?: string
+  dateFrom?: string
+  dateTo?: string
+}) {
+  const estimate = useAICostEstimate()
+
+  // Fetch on mount
+  useState(() => {
+    estimate.mutate({ feature, scope_type: scopeType, scope_id: scopeId, date_from: dateFrom, date_to: dateTo })
+  })
+
+  if (estimate.isPending) {
+    return <Skeleton className="h-4 w-48" />
+  }
+  if (estimate.data) {
+    const { estimated_input_tokens, estimated_output_tokens, estimated_cost_usd } = estimate.data
+    return (
+      <p className="text-xs text-muted-foreground">
+        Estimated: ~{(estimated_input_tokens + estimated_output_tokens).toLocaleString()} tokens (~${estimated_cost_usd.toFixed(4)})
+      </p>
+    )
+  }
+  return null
+}
 
 function HistoryList({
   items,
   emptyMessage,
+  onRegenerate,
+  isRegenerating,
 }: {
   items: AIAnalysisType[]
   emptyMessage: string
+  onRegenerate?: (item: AIAnalysisType) => void
+  isRegenerating?: boolean
 }) {
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
@@ -51,6 +123,7 @@ function HistoryList({
           >
             <CardTitle className="flex items-center gap-2 text-sm">
               <Badge variant="secondary">{a.analysis_type}</Badge>
+              {a.reused && <Badge variant="outline" className="text-blue-600">cached</Badge>}
               {a.scope_type && a.scope_id && (
                 <span className="text-muted-foreground">
                   {a.scope_type}: {a.scope_id}
@@ -63,10 +136,22 @@ function HistoryList({
           </CardHeader>
           {expandedId === a.id && (
             <CardContent>
+              {onRegenerate && a.reused && (
+                <ReusedBanner
+                  analysis={a}
+                  onRegenerate={() => onRegenerate(a)}
+                  isPending={isRegenerating ?? false}
+                />
+              )}
               {a.input_summary && (
                 <p className="mb-3 text-sm text-muted-foreground">{a.input_summary}</p>
               )}
               <AnalysisResultRenderer analysisType={a.analysis_type} result={a.result} />
+              {a.estimated_cost_usd != null && a.estimated_cost_usd > 0 && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Cost: ${a.estimated_cost_usd.toFixed(4)} ({a.input_tokens?.toLocaleString()} in / {a.output_tokens?.toLocaleString()} out)
+                </p>
+              )}
             </CardContent>
           )}
         </Card>
@@ -83,6 +168,7 @@ export default function AIAnalysis() {
   const runTeamHealth = useRunTeamHealth()
   const { data: developers } = useDevelopers()
   const { data: repos } = useRepos()
+  const { data: aiSettings } = useAISettings()
 
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<AIAnalyzeRequest>({
@@ -106,6 +192,12 @@ export default function AIAnalysis() {
   const prepHistory = (history ?? []).filter((a) => a.analysis_type === 'one_on_one_prep')
   const healthHistory = (history ?? []).filter((a) => a.analysis_type === 'team_health')
 
+  // Budget warning
+  const showBudgetWarning =
+    aiSettings &&
+    aiSettings.budget_pct_used != null &&
+    aiSettings.budget_pct_used >= aiSettings.budget_warning_threshold
+
   if (isError) {
     return <ErrorCard message="Could not load AI analysis history." onRetry={() => refetch()} />
   }
@@ -121,6 +213,20 @@ export default function AIAnalysis() {
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-bold">AI Analysis</h1>
+
+      {/* Budget warning */}
+      {showBudgetWarning && (
+        <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+          <span className="text-amber-700 dark:text-amber-400">
+            AI budget is {Math.round((aiSettings.budget_pct_used ?? 0) * 100)}% used this month
+            ({aiSettings.current_month_tokens.toLocaleString()} / {aiSettings.monthly_token_budget?.toLocaleString()} tokens).
+          </span>
+          <Link to="/settings/ai" className="ml-auto text-xs font-medium text-amber-700 underline hover:no-underline dark:text-amber-400">
+            Manage in AI Settings
+          </Link>
+        </div>
+      )}
 
       <Tabs defaultValue="general">
         <TabsList>
@@ -216,6 +322,16 @@ export default function AIAnalysis() {
                       Date range: {dateFrom} to {dateTo}
                     </p>
 
+                    {form.scope_id && (
+                      <CostEstimateLine
+                        feature="general_analysis"
+                        scopeType={form.scope_type}
+                        scopeId={form.scope_id}
+                        dateFrom={new Date(dateFrom).toISOString()}
+                        dateTo={new Date(dateTo).toISOString()}
+                      />
+                    )}
+
                     <div className="flex justify-end gap-2">
                       <DialogClose asChild>
                         <Button variant="outline">Cancel</Button>
@@ -225,9 +341,11 @@ export default function AIAnalysis() {
                         onClick={() => {
                           runAnalysis.mutate(
                             {
-                              ...form,
-                              date_from: new Date(dateFrom).toISOString(),
-                              date_to: new Date(dateTo).toISOString(),
+                              data: {
+                                ...form,
+                                date_from: new Date(dateFrom).toISOString(),
+                                date_to: new Date(dateTo).toISOString(),
+                              },
                             },
                             { onSuccess: () => setOpen(false) }
                           )
@@ -241,7 +359,25 @@ export default function AIAnalysis() {
               </Dialog>
             </div>
 
-            <HistoryList items={generalHistory} emptyMessage="No general analyses yet. Run one to get started." />
+            <HistoryList
+              items={generalHistory}
+              emptyMessage="No general analyses yet. Run one to get started."
+              onRegenerate={(item) => {
+                if (item.analysis_type && item.scope_type && item.scope_id && item.date_from && item.date_to) {
+                  runAnalysis.mutate({
+                    data: {
+                      analysis_type: item.analysis_type as AIAnalyzeRequest['analysis_type'],
+                      scope_type: item.scope_type as AIAnalyzeRequest['scope_type'],
+                      scope_id: item.scope_id,
+                      date_from: item.date_from,
+                      date_to: item.date_to,
+                    },
+                    force: true,
+                  })
+                }
+              }}
+              isRegenerating={runAnalysis.isPending}
+            />
           </div>
         </TabsContent>
 
@@ -272,9 +408,11 @@ export default function AIAnalysis() {
                   disabled={!prepDevId || runOneOnOnePrep.isPending}
                   onClick={() => {
                     runOneOnOnePrep.mutate({
-                      developer_id: Number(prepDevId),
-                      date_from: new Date(dateFrom).toISOString(),
-                      date_to: new Date(dateTo).toISOString(),
+                      data: {
+                        developer_id: Number(prepDevId),
+                        date_from: new Date(dateFrom).toISOString(),
+                        date_to: new Date(dateTo).toISOString(),
+                      },
                     })
                   }}
                 >
@@ -283,7 +421,23 @@ export default function AIAnalysis() {
               </CardContent>
             </Card>
 
-            <HistoryList items={prepHistory} emptyMessage="No 1:1 prep briefs yet." />
+            <HistoryList
+              items={prepHistory}
+              emptyMessage="No 1:1 prep briefs yet."
+              onRegenerate={(item) => {
+                if (item.scope_id && item.date_from && item.date_to) {
+                  runOneOnOnePrep.mutate({
+                    data: {
+                      developer_id: Number(item.scope_id),
+                      date_from: item.date_from,
+                      date_to: item.date_to,
+                    },
+                    force: true,
+                  })
+                }
+              }}
+              isRegenerating={runOneOnOnePrep.isPending}
+            />
           </div>
         </TabsContent>
 
@@ -312,9 +466,11 @@ export default function AIAnalysis() {
                   disabled={runTeamHealth.isPending}
                   onClick={() => {
                     runTeamHealth.mutate({
-                      ...(healthTeam ? { team: healthTeam } : {}),
-                      date_from: new Date(dateFrom).toISOString(),
-                      date_to: new Date(dateTo).toISOString(),
+                      data: {
+                        ...(healthTeam ? { team: healthTeam } : {}),
+                        date_from: new Date(dateFrom).toISOString(),
+                        date_to: new Date(dateTo).toISOString(),
+                      },
                     })
                   }}
                 >
@@ -323,7 +479,23 @@ export default function AIAnalysis() {
               </CardContent>
             </Card>
 
-            <HistoryList items={healthHistory} emptyMessage="No team health assessments yet." />
+            <HistoryList
+              items={healthHistory}
+              emptyMessage="No team health assessments yet."
+              onRegenerate={(item) => {
+                if (item.date_from && item.date_to) {
+                  runTeamHealth.mutate({
+                    data: {
+                      ...(item.scope_id && item.scope_id !== 'all' ? { team: item.scope_id } : {}),
+                      date_from: item.date_from,
+                      date_to: item.date_to,
+                    },
+                    force: true,
+                  })
+                }
+              }}
+              isRegenerating={runTeamHealth.isPending}
+            />
           </div>
         </TabsContent>
       </Tabs>

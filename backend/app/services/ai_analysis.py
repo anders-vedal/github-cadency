@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 import anthropic
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -266,14 +267,62 @@ async def run_analysis(
     date_from: datetime,
     date_to: datetime,
     triggered_by: str = "api",
+    force: bool = False,
 ) -> AIAnalysis:
     """Run an AI analysis and store the result."""
+    from app.services.ai_settings import (
+        check_budget,
+        check_feature_enabled,
+        compute_cost,
+        find_recent_analysis,
+    )
+
+    # --- Guards ---
+    ai_settings = await check_feature_enabled(db, "general_analysis")
+
+    budget_info = await check_budget(db, ai_settings)
+    if budget_info["over_budget"]:
+        raise HTTPException(
+            status_code=429, detail="Monthly AI token budget exceeded"
+        )
+
+    # Dedup: return cached result if recent (unless force=True)
+    if not force:
+        recent = await find_recent_analysis(
+            db, analysis_type, scope_type, scope_id,
+            ai_settings.cooldown_minutes,
+        )
+        if recent:
+            # Create a lightweight pointer row so the caller knows it's reused
+            reused = AIAnalysis(
+                analysis_type=recent.analysis_type,
+                scope_type=recent.scope_type,
+                scope_id=recent.scope_id,
+                date_from=recent.date_from,
+                date_to=recent.date_to,
+                input_summary=recent.input_summary,
+                result=recent.result,
+                raw_response=recent.raw_response,
+                model_used=recent.model_used,
+                tokens_used=0,
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost_usd=0,
+                reused_from_id=recent.id,
+                triggered_by=triggered_by,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(reused)
+            await db.commit()
+            await db.refresh(reused)
+            return reused
+
+    # --- Data gathering ---
     items, input_summary = await _gather_scope_texts(
         db, scope_type, scope_id, date_from, date_to
     )
 
     if not items:
-        # No data to analyze — store empty result
         analysis = AIAnalysis(
             analysis_type=analysis_type,
             scope_type=scope_type,
@@ -284,6 +333,9 @@ async def run_analysis(
             result={"error": "No data available for the selected scope and date range"},
             model_used=MODEL,
             tokens_used=0,
+            input_tokens=0,
+            output_tokens=0,
+            estimated_cost_usd=0,
             triggered_by=triggered_by,
             created_at=datetime.now(timezone.utc),
         )
@@ -307,7 +359,6 @@ async def run_analysis(
         (b.text for b in response.content if b.type == "text"), ""
     )
 
-    # Parse JSON from response (strip markdown fences if present)
     json_text = raw_text.strip()
     if json_text.startswith("```"):
         json_text = json_text.split("\n", 1)[-1]
@@ -318,8 +369,13 @@ async def run_analysis(
     except json.JSONDecodeError:
         result = {"raw_text": raw_text, "parse_error": True}
 
-    tokens_used = (
-        response.usage.input_tokens + response.usage.output_tokens
+    inp_tokens = response.usage.input_tokens
+    out_tokens = response.usage.output_tokens
+    tokens_used = inp_tokens + out_tokens
+    est_cost = compute_cost(
+        inp_tokens, out_tokens,
+        ai_settings.input_token_price_per_million,
+        ai_settings.output_token_price_per_million,
     )
 
     analysis = AIAnalysis(
@@ -333,6 +389,9 @@ async def run_analysis(
         raw_response=raw_text,
         model_used=MODEL,
         tokens_used=tokens_used,
+        input_tokens=inp_tokens,
+        output_tokens=out_tokens,
+        estimated_cost_usd=est_cost,
         triggered_by=triggered_by,
         created_at=datetime.now(timezone.utc),
     )
@@ -358,6 +417,8 @@ async def _call_claude_and_store(
     triggered_by: str = "api",
 ) -> AIAnalysis:
     """Shared helper: call Claude API, parse JSON response, store in ai_analyses."""
+    from app.services.ai_settings import compute_cost, get_ai_settings
+
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     response = await client.messages.create(
         model=MODEL,
@@ -378,7 +439,16 @@ async def _call_claude_and_store(
     except json.JSONDecodeError:
         result = {"raw_text": raw_text, "parse_error": True}
 
-    tokens_used = response.usage.input_tokens + response.usage.output_tokens
+    inp_tokens = response.usage.input_tokens
+    out_tokens = response.usage.output_tokens
+    tokens_used = inp_tokens + out_tokens
+
+    ai_settings = await get_ai_settings(db)
+    est_cost = compute_cost(
+        inp_tokens, out_tokens,
+        ai_settings.input_token_price_per_million,
+        ai_settings.output_token_price_per_million,
+    )
 
     analysis = AIAnalysis(
         analysis_type=analysis_type,
@@ -391,6 +461,9 @@ async def _call_claude_and_store(
         raw_response=raw_text,
         model_used=MODEL,
         tokens_used=tokens_used,
+        input_tokens=inp_tokens,
+        output_tokens=out_tokens,
+        estimated_cost_usd=est_cost,
         triggered_by=triggered_by,
         created_at=datetime.now(timezone.utc),
     )
@@ -425,7 +498,11 @@ KEY GUIDELINES:
 - The "framing" field must provide ready-to-use language that is constructive, never accusatory
 - Focus on patterns, not individual incidents
 - Highlight both strengths and growth areas
-- If metrics are below team benchmarks, frame as opportunities, not problems"""
+- If metrics are below team benchmarks, frame as opportunities, not problems
+- If issue_creator_stats is present, analyze the developer's issue quality patterns:
+  compare their checklist usage, reopen rate, not-planned rate, and close times against
+  team averages. Surface actionable insights like "Issues without checklists take longer to close"
+  or "High reopen rate may indicate unclear acceptance criteria"."""
 
 
 async def run_one_on_one_prep(
@@ -433,13 +510,59 @@ async def run_one_on_one_prep(
     developer_id: int,
     date_from: datetime,
     date_to: datetime,
+    force: bool = False,
 ) -> AIAnalysis:
     """Generate a structured 1:1 prep brief for a developer."""
+    from app.services.ai_settings import (
+        check_budget,
+        check_feature_enabled,
+        find_recent_analysis,
+    )
+
+    # --- Guards ---
+    ai_settings = await check_feature_enabled(db, "one_on_one_prep")
+
+    budget_info = await check_budget(db, ai_settings)
+    if budget_info["over_budget"]:
+        raise HTTPException(
+            status_code=429, detail="Monthly AI token budget exceeded"
+        )
+
+    if not force:
+        recent = await find_recent_analysis(
+            db, "one_on_one_prep", "developer", str(developer_id),
+            ai_settings.cooldown_minutes,
+        )
+        if recent:
+            reused = AIAnalysis(
+                analysis_type=recent.analysis_type,
+                scope_type=recent.scope_type,
+                scope_id=recent.scope_id,
+                date_from=recent.date_from,
+                date_to=recent.date_to,
+                input_summary=recent.input_summary,
+                result=recent.result,
+                raw_response=recent.raw_response,
+                model_used=recent.model_used,
+                tokens_used=0,
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost_usd=0,
+                reused_from_id=recent.id,
+                triggered_by="api",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(reused)
+            await db.commit()
+            await db.refresh(reused)
+            return reused
+
     from app.services.goals import get_goal_progress, list_goals
     from app.services.stats import (
         get_benchmarks,
         get_developer_stats,
         get_developer_trends,
+        get_issue_creator_stats,
     )
 
     dev = await db.get(Developer, developer_id)
@@ -509,6 +632,32 @@ async def run_one_on_one_prep(
     )
     last_brief = last_brief_result.scalar_one_or_none()
 
+    # 8. Issue creator stats — include if this developer has created issues
+    issue_creator_context = None
+    has_created_issues = (
+        await db.execute(
+            select(func.count()).select_from(Issue).where(
+                Issue.creator_github_username == dev.github_username,
+                Issue.created_at >= date_from,
+                Issue.created_at <= date_to,
+            )
+        )
+    ).scalar_one()
+    if has_created_issues > 0:
+        creator_stats_resp = await get_issue_creator_stats(
+            db, team=dev.team, date_from=date_from, date_to=date_to
+        )
+        # Find this developer's entry in the per-creator list
+        dev_creator = next(
+            (c for c in creator_stats_resp.creators if c.github_username == dev.github_username),
+            None,
+        )
+        if dev_creator:
+            issue_creator_context = {
+                "developer_stats": dev_creator.model_dump(),
+                "team_averages": creator_stats_resp.team_averages.model_dump(),
+            }
+
     # Build the context document for Claude
     context = {
         "developer": {
@@ -536,6 +685,7 @@ async def run_one_on_one_prep(
             "period_summary": last_brief.result.get("period_summary"),
             "suggested_talking_points": last_brief.result.get("suggested_talking_points"),
         } if last_brief and last_brief.result and not last_brief.result.get("parse_error") else None,
+        "issue_creator_stats": issue_creator_context,
     }
 
     input_summary = (
@@ -595,8 +745,54 @@ async def run_team_health(
     team: str | None,
     date_from: datetime,
     date_to: datetime,
+    force: bool = False,
 ) -> AIAnalysis:
     """Generate a comprehensive team health assessment."""
+    from app.services.ai_settings import (
+        check_budget,
+        check_feature_enabled,
+        find_recent_analysis,
+    )
+
+    # --- Guards ---
+    ai_settings = await check_feature_enabled(db, "team_health")
+
+    budget_info = await check_budget(db, ai_settings)
+    if budget_info["over_budget"]:
+        raise HTTPException(
+            status_code=429, detail="Monthly AI token budget exceeded"
+        )
+
+    scope_id = team or "all"
+    if not force:
+        recent = await find_recent_analysis(
+            db, "team_health", "team", scope_id,
+            ai_settings.cooldown_minutes,
+        )
+        if recent:
+            reused = AIAnalysis(
+                analysis_type=recent.analysis_type,
+                scope_type=recent.scope_type,
+                scope_id=recent.scope_id,
+                date_from=recent.date_from,
+                date_to=recent.date_to,
+                input_summary=recent.input_summary,
+                result=recent.result,
+                raw_response=recent.raw_response,
+                model_used=recent.model_used,
+                tokens_used=0,
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost_usd=0,
+                reused_from_id=recent.id,
+                triggered_by="api",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(reused)
+            await db.commit()
+            await db.refresh(reused)
+            return reused
+
     from app.services.collaboration import get_collaboration
     from app.services.stats import get_benchmarks, get_team_stats, get_workload
 

@@ -112,3 +112,32 @@ class TestClassifyReviewQuality:
     def test_backward_compat_standard_unchanged(self):
         assert classify_review_quality("COMMENTED", 200, 0) == "standard"
         assert classify_review_quality("APPROVED", 300, 1) == "standard"
+
+    # --- Comment type integration ---
+
+    def test_thorough_architectural_comments(self):
+        # 3+ architectural comments → thorough regardless of body length
+        assert classify_review_quality("COMMENTED", 10, 0, architectural_comment_count=3) == "thorough"
+
+    def test_not_thorough_fewer_architectural(self):
+        assert classify_review_quality("COMMENTED", 10, 0, architectural_comment_count=2) != "thorough"
+
+    def test_standard_blocker_comment(self):
+        # Has blocker comment → minimum standard
+        assert classify_review_quality("COMMENTED", 10, 0, has_blocker_comment=True) == "standard"
+
+    def test_blocker_doesnt_override_thorough(self):
+        # Already thorough from body length — blocker doesn't demote
+        assert classify_review_quality("APPROVED", 501, 0, has_blocker_comment=True) == "thorough"
+
+    def test_blocker_prevents_rubber_stamp(self):
+        # Would be rubber_stamp, but blocker promotes to standard
+        assert classify_review_quality("APPROVED", 5, 0, has_blocker_comment=True) == "standard"
+
+    def test_architectural_prevents_rubber_stamp(self):
+        assert classify_review_quality("APPROVED", 5, 0, architectural_comment_count=3) == "thorough"
+
+    def test_defaults_backward_compatible(self):
+        # New params default to False/0, so existing calls unchanged
+        assert classify_review_quality("APPROVED", 0, 0) == "rubber_stamp"
+        assert classify_review_quality("COMMENTED", 50, 0) == "minimal"

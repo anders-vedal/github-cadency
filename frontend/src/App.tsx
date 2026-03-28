@@ -10,7 +10,7 @@ import Dashboard from '@/pages/Dashboard'
 import TeamRegistry from '@/pages/TeamRegistry'
 import DeveloperDetail from '@/pages/DeveloperDetail'
 import Repos from '@/pages/Repos'
-import SyncStatus from '@/pages/SyncStatus'
+import SyncPage from '@/pages/sync/SyncPage'
 import AIAnalysis from '@/pages/AIAnalysis'
 import Goals from '@/pages/Goals'
 import WorkloadOverview from '@/pages/insights/WorkloadOverview'
@@ -18,6 +18,11 @@ import CollaborationMatrix from '@/pages/insights/CollaborationMatrix'
 import Benchmarks from '@/pages/insights/Benchmarks'
 import IssueQuality from '@/pages/insights/IssueQuality'
 import CodeChurn from '@/pages/insights/CodeChurn'
+import CIInsights from '@/pages/insights/CIInsights'
+import DoraMetrics from '@/pages/insights/DoraMetrics'
+import Investment from '@/pages/insights/Investment'
+import ExecutiveDashboard from '@/pages/ExecutiveDashboard'
+import AISettingsPage from '@/pages/settings/AISettings'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 
@@ -60,13 +65,18 @@ function AppRoutes() {
                       <Route path="/team" element={auth.isAdmin ? <TeamRegistry /> : <Navigate to="/" replace />} />
                       <Route path="/team/:id" element={<DeveloperDetail />} />
                       <Route path="/repos" element={auth.isAdmin ? <Repos /> : <Navigate to="/" replace />} />
-                      <Route path="/sync" element={auth.isAdmin ? <SyncStatus /> : <Navigate to="/" replace />} />
+                      <Route path="/sync" element={auth.isAdmin ? <SyncPage /> : <Navigate to="/" replace />} />
                       <Route path="/insights/workload" element={auth.isAdmin ? <WorkloadOverview /> : <Navigate to="/" replace />} />
                       <Route path="/insights/collaboration" element={auth.isAdmin ? <CollaborationMatrix /> : <Navigate to="/" replace />} />
                       <Route path="/insights/benchmarks" element={auth.isAdmin ? <Benchmarks /> : <Navigate to="/" replace />} />
                       <Route path="/insights/issue-quality" element={auth.isAdmin ? <IssueQuality /> : <Navigate to="/" replace />} />
                       <Route path="/insights/code-churn" element={auth.isAdmin ? <CodeChurn /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/cicd" element={auth.isAdmin ? <CIInsights /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/dora" element={auth.isAdmin ? <DoraMetrics /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/investment" element={auth.isAdmin ? <Investment /> : <Navigate to="/" replace />} />
+                      <Route path="/executive" element={auth.isAdmin ? <ExecutiveDashboard /> : <Navigate to="/" replace />} />
                       <Route path="/ai" element={auth.isAdmin ? <AIAnalysis /> : <Navigate to="/" replace />} />
+                      <Route path="/settings/ai" element={auth.isAdmin ? <AISettingsPage /> : <Navigate to="/" replace />} />
                       <Route path="/goals" element={<Goals />} />
                     </Routes>
                   </ErrorBoundary>

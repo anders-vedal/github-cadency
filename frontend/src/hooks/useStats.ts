@@ -2,8 +2,11 @@ import { useQuery, useQueries } from '@tanstack/react-query'
 import { apiFetch } from '@/utils/api'
 import type {
   BenchmarksResponse,
+  CIStatsResponse,
   CodeChurnResponse,
   CollaborationResponse,
+  CollaborationTrendsResponse,
+  DORAMetricsResponse,
   DeveloperStatsWithPercentiles,
   DeveloperTrendsResponse,
   IssueCreatorStatsResponse,
@@ -11,6 +14,7 @@ import type {
   RiskSummaryResponse,
   StalePRsResponse,
   TeamStats,
+  WorkAllocationResponse,
   WorkloadResponse,
 } from '@/utils/types'
 
@@ -141,6 +145,17 @@ export function useCollaboration(team?: string, dateFrom?: string, dateTo?: stri
   })
 }
 
+export function useCollaborationTrends(team?: string, dateFrom?: string, dateTo?: string) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  return useQuery<CollaborationTrendsResponse>({
+    queryKey: ['collaboration-trends', team, dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/collaboration/trends?${params}`),
+  })
+}
+
 export function useRiskSummary(
   team?: string,
   dateFrom?: string,
@@ -174,5 +189,50 @@ export function useCodeChurn(
     queryKey: ['code-churn', repoId, dateFrom, dateTo, limit],
     queryFn: () => apiFetch(`/stats/repo/${repoId}/churn?${params}`),
     enabled: !!repoId,
+  })
+}
+
+export function useWorkAllocation(
+  team?: string,
+  dateFrom?: string,
+  dateTo?: string,
+  useAi: boolean = false,
+) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  if (useAi) params.set('use_ai', 'true')
+  return useQuery<WorkAllocationResponse>({
+    queryKey: ['work-allocation', team, dateFrom, dateTo, useAi],
+    queryFn: () => apiFetch(`/stats/work-allocation?${params}`),
+  })
+}
+
+export function useCIStats(
+  dateFrom?: string,
+  dateTo?: string,
+  repoId?: number | null,
+) {
+  const params = dateParams(dateFrom, dateTo)
+  if (repoId) params.set('repo_id', String(repoId))
+  return useQuery<CIStatsResponse>({
+    queryKey: ['ci-stats', dateFrom, dateTo, repoId],
+    queryFn: () => apiFetch(`/stats/ci?${params}`),
+  })
+}
+
+export function useDoraMetrics(
+  dateFrom?: string,
+  dateTo?: string,
+  repoId?: number | null,
+) {
+  const params = new URLSearchParams()
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  if (repoId) params.set('repo_id', String(repoId))
+  return useQuery<DORAMetricsResponse>({
+    queryKey: ['dora-metrics', dateFrom, dateTo, repoId],
+    queryFn: () => apiFetch(`/stats/dora?${params}`),
   })
 }

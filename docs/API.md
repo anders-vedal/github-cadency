@@ -22,9 +22,10 @@ Authorization: Bearer {jwt_token}
 | **Auth** (`/api/auth/*`) | Public | Public |
 | **Developer stats** (`/api/stats/developer/{id}`) | Any ID | Own ID only |
 | **Developer trends** (`/api/stats/developer/{id}/trends`) | Any ID | Own ID only |
-| **Team/benchmarks/workload/collaboration/stale-prs/issue-linkage/issue-quality/issue-creators** | Yes | No (403) |
+| **Team/benchmarks/workload/collaboration/collaboration-trends/stale-prs/issue-linkage/issue-quality/issue-creators** | Yes | No (403) |
 | **Code churn** (`/api/stats/repo/{id}/churn`) | Yes | No (403) |
 | **PR risk** (`/api/stats/pr/{id}/risk`, `/api/stats/risk-summary`) | Yes | No (403) |
+| **CI/CD stats** (`/api/stats/ci`) | Yes | No (403) |
 | **Repo stats** (`/api/stats/repo/{id}`) | Yes | Yes |
 | **Developers CRUD** (`/api/developers/*`) | Full access | GET own profile only |
 | **Goals** (`/api/goals/*`) | Full access | GET own goals, POST/PATCH self-goals |
@@ -210,9 +211,25 @@ Developer metrics for a date range. **Developers can only access their own stats
   "prs_self_merged": 2,
   "self_merge_rate": 20.0,
   "prs_reverted": 0,
-  "reverts_authored": 0
+  "reverts_authored": 0,
+  "comment_type_distribution": {
+    "nit": 8,
+    "blocker": 2,
+    "suggestion": 5,
+    "question": 3,
+    "architectural": 1,
+    "praise": 4,
+    "general": 12
+  },
+  "nit_ratio": 0.2286,
+  "blocker_catch_rate": 0.125
 }
 ```
+
+**Comment type fields:**
+- `comment_type_distribution` — counts of review comments by type (as reviewer). Types: `nit`, `blocker`, `architectural`, `question`, `praise`, `suggestion`, `general`. Empty `{}` if no comments.
+- `nit_ratio` — fraction of all review comments that are nits (`nit_count / total_comments`). `null` if no comments.
+- `blocker_catch_rate` — fraction of reviews that contain at least one blocker comment (`reviews_with_blocker / total_reviews_given`). `null` if no reviews given.
 
 When `include_percentiles=true`, adds:
 ```json
@@ -435,6 +452,46 @@ Insights:
 - **Bus factors:** Reviewers with >70% of all reviews on a repo in the date range
 - **Isolated:** Developers with 0 reviews given AND reviews received from <= 1 unique reviewer
 - **Strongest pairs:** Top 10 mutual review pairs by combined review count
+
+### GET /api/stats/collaboration/trends
+
+Monthly bus factor, silo, and isolation counts over time. Divides the date range into monthly buckets and computes collaboration health indicators per bucket. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `team` | string | - | Filter by team |
+| `date_from` | datetime | 30 days ago | Start of date range |
+| `date_to` | datetime | now | End of date range |
+
+**Response:** `200 OK`
+```json
+{
+  "periods": [
+    {
+      "period_start": "2025-01-01T00:00:00",
+      "period_end": "2025-02-01T00:00:00",
+      "period_label": "2025-01",
+      "bus_factor_count": 2,
+      "silo_count": 1,
+      "isolated_developer_count": 3
+    },
+    {
+      "period_start": "2025-02-01T00:00:00",
+      "period_end": "2025-03-01T00:00:00",
+      "period_label": "2025-02",
+      "bus_factor_count": 1,
+      "silo_count": 0,
+      "isolated_developer_count": 2
+    }
+  ]
+}
+```
+
+Implementation details:
+- Fetches all reviews in the full date range with a single query, then buckets in Python — 2 DB queries total regardless of period count
+- **Bus factor:** Repos where one reviewer handles >70% of reviews in the bucket
+- **Silo:** Team pairs with zero cross-team reviews in the bucket. Returns 0 (not the total possible pairs) when a bucket has no review activity to avoid misleading spikes
+- **Isolated:** Developers who gave 0 reviews AND received reviews from <= 1 unique reviewer. Returns 0 when a bucket has no review activity
 
 ### GET /api/stats/workload
 
@@ -866,6 +923,119 @@ Invalid `min_risk_level` or `scope` values return `422 Unprocessable Entity`.
 
 ---
 
+### GET /api/stats/ci
+
+CI/CD check-run analysis across all repos or scoped to a single repo. **Admin only.**
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `date_from` | datetime (ISO 8601) | 30 days ago | Start of date range |
+| `date_to` | datetime (ISO 8601) | now | End of date range |
+| `repo_id` | integer | _(none)_ | Optional — scope results to a single repository |
+
+**Response `200 OK`:**
+
+```json
+{
+  "prs_merged_with_failing_checks": 3,
+  "avg_checks_to_green": 1.4,
+  "flaky_checks": [
+    {
+      "name": "integration-tests",
+      "failure_rate": 0.182,
+      "total_runs": 22
+    }
+  ],
+  "avg_build_duration_s": 245.3,
+  "slowest_checks": [
+    {
+      "name": "e2e-tests",
+      "avg_duration_s": 612.5
+    },
+    {
+      "name": "integration-tests",
+      "avg_duration_s": 340.2
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `prs_merged_with_failing_checks` | Count of merged PRs that had at least one check run with `conclusion="failure"` |
+| `avg_checks_to_green` | Average number of `run_attempt` values before a check passed. `null` if no successful checks exist |
+| `flaky_checks` | Check names with >10% failure rate (minimum 5 runs). Sorted by failure rate descending |
+| `avg_build_duration_s` | Mean duration in seconds across all check runs with timing data. `null` if no duration data |
+| `slowest_checks` | Top 5 check names ranked by average duration, descending |
+
+---
+
+### GET /api/stats/dora
+
+DORA metrics: deployment frequency and change lead time from GitHub Actions workflow runs. Only returns data when `DEPLOY_WORKFLOW_NAME` is configured. **Admin only.**
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `date_from` | datetime (ISO 8601) | 30 days ago | Start of date range |
+| `date_to` | datetime (ISO 8601) | now | End of date range |
+| `repo_id` | integer | _(none)_ | Optional — scope results to a single repository |
+
+**Response `200 OK`:**
+
+```json
+{
+  "deploy_frequency": 0.429,
+  "deploy_frequency_band": "medium",
+  "avg_lead_time_hours": 18.5,
+  "lead_time_band": "high",
+  "total_deployments": 13,
+  "period_days": 30,
+  "deployments": [
+    {
+      "id": 42,
+      "repo_name": "org/api-service",
+      "environment": "production",
+      "sha": "abc123def456789...",
+      "deployed_at": "2026-03-27T14:30:00Z",
+      "workflow_name": "deploy-production",
+      "status": "success",
+      "lead_time_hours": 4.25
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `deploy_frequency` | Successful deployments per day in the period (`total_deployments / period_days`) |
+| `deploy_frequency_band` | DORA benchmark classification: `elite` (>1/day), `high` (daily–weekly), `medium` (weekly–monthly), `low` (<monthly) |
+| `avg_lead_time_hours` | Average hours from oldest undeployed merged PR to deployment. `null` if no lead time data |
+| `lead_time_band` | DORA benchmark classification: `elite` (<1h), `high` (<1 day), `medium` (<1 week), `low` (>1 week) |
+| `total_deployments` | Count of successful deployments in the period |
+| `period_days` | Number of days in the queried date range |
+| `deployments` | Last 20 successful deployments in the period, ordered by `deployed_at` descending |
+
+**Deployment detail fields:**
+
+| Field | Description |
+|-------|-------------|
+| `id` | Deployment record ID |
+| `repo_name` | Repository full name (e.g. `org/repo`) |
+| `environment` | Deployment environment (from `DEPLOY_ENVIRONMENT` config, default `"production"`) |
+| `sha` | Deployed commit SHA |
+| `deployed_at` | Deployment completion timestamp (ISO 8601) |
+| `workflow_name` | GitHub Actions workflow name |
+| `status` | Deployment status (`"success"`) |
+| `lead_time_hours` | Hours from oldest undeployed merged PR to this deployment. `null` for the first deployment (no prior reference) |
+
+**Configuration:** Deployment sync requires the `DEPLOY_WORKFLOW_NAME` environment variable to be set to the exact name of the GitHub Actions workflow that represents a production deployment. If empty, no deployments are synced and this endpoint returns zero values.
+
+---
+
 ## Developer Goals
 
 **Access:** Admin has full CRUD. Developers can view their own goals, create self-goals via `/goals/self`, and update their own self-created goals.
@@ -981,28 +1151,111 @@ Get goal progress with 8-week history. Triggers auto-achievement check: if the m
 
 ## Sync
 
-**All sync endpoints are admin only.**
+**All sync endpoints are admin only.** Returns `409 Conflict` if a sync is already running (concurrency guard).
 
-### POST /api/sync/full
+### POST /api/sync/start
 
-Trigger a full sync (all tracked repos, all data). Runs as a background task.
+Start a new sync. Supports full or incremental, optional repo filtering and time range override.
+
+**Request Body:** `SyncTriggerRequest`
+```json
+{
+  "sync_type": "incremental",
+  "repo_ids": [1, 2, 3],
+  "since": "2026-01-01T00:00:00Z"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sync_type` | `"full"` \| `"incremental"` | `"incremental"` | Full re-syncs all data; incremental fetches since each repo's `last_synced_at` |
+| `repo_ids` | `int[]` \| `null` | `null` | Specific repo IDs to sync. `null` = all tracked repos |
+| `since` | `datetime` \| `null` | `null` | Override per-repo `last_synced_at` with a uniform date |
 
 **Response:** `202 Accepted`
 ```json
-{ "status": "accepted", "sync_type": "full" }
+{ "status": "accepted", "sync_type": "incremental" }
 ```
 
-### POST /api/sync/incremental
+**Error:** `409 Conflict` — a sync is already in progress.
 
-Trigger an incremental sync (changes since last sync per repo).
+### POST /api/sync/resume/{event_id}
+
+Resume an interrupted sync, processing only repos that were not completed in the original run.
+
+**Path Params:** `event_id` (int) — ID of the failed/partial sync event to resume.
 
 **Response:** `202 Accepted`
+```json
+{ "status": "accepted", "remaining_repos": 5 }
+```
+
+**Errors:**
+- `404` — sync event not found
+- `400` — event is not resumable or no remaining repos
+- `409` — a sync is already in progress
+
+### GET /api/sync/status
+
+Get the current sync state: active sync (if any), last completed sync, and summary stats.
+
+**Response:** `200 OK` — `SyncStatusResponse`
+```json
+{
+  "active_sync": {
+    "id": 42,
+    "sync_type": "incremental",
+    "status": "started",
+    "total_repos": 50,
+    "current_repo_name": "org/repo-name",
+    "repos_completed": [
+      { "repo_id": 1, "repo_name": "org/repo-a", "status": "ok", "prs": 15, "issues": 3, "warnings": [] }
+    ],
+    "repos_failed": [],
+    "repos_synced": 23,
+    "prs_upserted": 150,
+    "issues_upserted": 45,
+    "errors": [],
+    "log_summary": [
+      { "ts": "10:32:15", "level": "info", "msg": "Starting sync", "repo": "org/repo-a" }
+    ],
+    "rate_limit_wait_s": 0,
+    "is_resumable": false,
+    "resumed_from_id": null,
+    "started_at": "2026-03-28T10:30:00Z",
+    "completed_at": null,
+    "duration_s": null
+  },
+  "last_completed": null,
+  "tracked_repos_count": 42,
+  "total_repos_count": 50,
+  "last_successful_sync": "2026-03-27T10:30:00Z",
+  "last_sync_duration_s": 1234
+}
+```
 
 ### GET /api/sync/repos
 
-List all repositories discovered from the GitHub organization.
+List all repositories with PR and issue counts.
 
 **Response:** `200 OK` — `RepoResponse[]`
+```json
+[
+  {
+    "id": 1,
+    "github_id": 123456,
+    "name": "repo-name",
+    "full_name": "org/repo-name",
+    "description": "Description",
+    "language": "Python",
+    "is_tracked": true,
+    "last_synced_at": "2026-03-28T10:30:00Z",
+    "created_at": "2026-01-01T00:00:00Z",
+    "pr_count": 150,
+    "issue_count": 45
+  }
+]
+```
 
 ### PATCH /api/sync/repos/{repo_id}/track
 
@@ -1013,17 +1266,63 @@ Enable or disable tracking for a repository.
 { "is_tracked": true }
 ```
 
-**Response:** `200 OK` — `RepoResponse`
+**Response:** `200 OK` — `RepoResponse` (includes `pr_count`, `issue_count`)
 
 ### GET /api/sync/events
 
-List recent sync events.
+List recent sync events with full progress and error details.
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
 | `limit` | int (1-200) | `50` | Max events to return |
 
 **Response:** `200 OK` — `SyncEventResponse[]` ordered by `started_at` desc
+
+Each event includes:
+- `repo_ids`, `since_override` — sync scope configuration
+- `total_repos`, `repos_synced` — progress counters
+- `current_repo_name` — currently syncing repo (null when idle/done)
+- `repos_completed` — list of `{repo_id, repo_name, status, prs, issues, warnings}`
+- `repos_failed` — list of `{repo_id, repo_name, error}`
+- `errors` — structured error objects (see below)
+- `log_summary` — condensed sync log entries `{ts, level, msg, repo?}`
+- `is_resumable` — `true` if sync can be resumed via `POST /sync/resume/{id}`
+- `resumed_from_id` — links to the original interrupted sync event
+- `rate_limit_wait_s` — total seconds spent waiting for GitHub rate limits
+
+### Structured Error Objects
+
+Each entry in `SyncEventResponse.errors`:
+```json
+{
+  "repo": "org/repo-name",
+  "repo_id": 42,
+  "step": "pull_requests",
+  "error_type": "github_api",
+  "status_code": 502,
+  "message": "502 Bad Gateway",
+  "retryable": true,
+  "timestamp": "2026-03-28T10:32:15Z",
+  "attempt": 2
+}
+```
+
+| `error_type` | `retryable` | Cause |
+|-------------|-------------|-------|
+| `github_api` (502/503/504) | `true` | Transient GitHub API errors — retried 3x with backoff |
+| `timeout` | `true` | Request timeout or connection error |
+| `auth` (401/403) | `false` | Token expired or insufficient permissions |
+| `github_api` (404/422) | `false` | Resource not found or validation error |
+| `unknown` | `false` | Unclassified exception |
+
+### Sync Statuses
+
+| Status | Meaning |
+|--------|---------|
+| `started` | Sync is currently running |
+| `completed` | All repos synced successfully |
+| `completed_with_errors` | Some repos succeeded, some failed. `is_resumable = true` |
+| `failed` | Top-level failure or all repos failed. `is_resumable = true` |
 
 ---
 
@@ -1046,9 +1345,38 @@ GitHub webhook receiver. No Bearer auth — uses HMAC signature verification.
 
 **All AI endpoints are admin only.** AI features require `ANTHROPIC_API_KEY` to be set. All analysis calls are synchronous (wait for Claude response). Results are persisted in `ai_analyses` table.
 
+All AI analysis endpoints (`/analyze`, `/one-on-one-prep`, `/team-health`) enforce three guards before calling Claude:
+1. **Feature toggle** — returns `403` if the master switch or specific feature is disabled in AI settings
+2. **Budget check** — returns `429` if monthly token budget is exceeded
+3. **Cooldown dedup** — returns a cached result (with `reused: true`) if an identical analysis was run within the cooldown window. Pass `?force=true` to bypass.
+
+**`AIAnalysisResponse` fields** (returned by all analysis endpoints):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | int | Analysis row ID |
+| `analysis_type` | string | `communication`, `conflict`, `sentiment`, `one_on_one_prep`, `team_health` |
+| `scope_type` | string | `developer`, `team`, `repo` |
+| `scope_id` | string | Entity ID or name |
+| `date_from`, `date_to` | datetime | Analysis period |
+| `input_summary` | string | Human-readable summary of data sent to Claude |
+| `result` | object | Structured JSON result (schema varies by `analysis_type`) |
+| `model_used` | string | Claude model ID (e.g. `claude-sonnet-4-0`) |
+| `tokens_used` | int | Total tokens (input + output) |
+| `input_tokens` | int or null | Input tokens sent to Claude |
+| `output_tokens` | int or null | Output tokens received from Claude |
+| `estimated_cost_usd` | float or null | Estimated cost based on configured pricing |
+| `reused` | bool | `true` if this result was served from cooldown cache |
+| `triggered_by` | string | `"api"` |
+| `created_at` | datetime | When the analysis was created |
+
 ### POST /api/ai/analyze
 
 Run a standard AI analysis (communication, conflict, or sentiment).
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `force` | bool | `false` | Bypass cooldown cache and always call Claude |
 
 **Request Body:**
 ```json
@@ -1071,6 +1399,10 @@ Run a standard AI analysis (communication, conflict, or sentiment).
 
 Generate a structured 1:1 meeting prep brief for a developer.
 
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `force` | bool | `false` | Bypass cooldown cache and always call Claude |
+
 **Request Body:**
 ```json
 {
@@ -1080,7 +1412,7 @@ Generate a structured 1:1 meeting prep brief for a developer.
 }
 ```
 
-**Context gathered:** developer stats, 4-period trends, team benchmarks, PR list, review quality tiers, active goals with progress, previous 1:1 brief (for continuity).
+**Context gathered:** developer stats, 4-period trends, team benchmarks, PR list, review quality tiers, active goals with progress, previous 1:1 brief (for continuity), issue creator stats with team averages (if developer has created issues in the period).
 
 **Response:** `201 Created` — `AIAnalysisResponse` where `result` contains:
 ```json
@@ -1106,6 +1438,10 @@ Generate a structured 1:1 meeting prep brief for a developer.
 ### POST /api/ai/team-health
 
 Generate a comprehensive team health assessment.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `force` | bool | `false` | Bypass cooldown cache and always call Claude |
 
 **Request Body:**
 ```json
@@ -1156,3 +1492,164 @@ List past analysis results.
 Get a specific analysis result.
 
 **Response:** `200 OK` — `AIAnalysisResponse`
+
+---
+
+## AI Settings & Cost Controls
+
+**All settings endpoints are admin only.** These manage AI feature toggles, budget limits, pricing configuration, and usage tracking.
+
+### GET /api/ai/settings
+
+Get current AI settings and usage summary for the current month.
+
+**Response:** `200 OK`
+```json
+{
+  "ai_enabled": true,
+  "feature_general_analysis": true,
+  "feature_one_on_one_prep": true,
+  "feature_team_health": true,
+  "feature_work_categorization": true,
+  "monthly_token_budget": 100000,
+  "budget_warning_threshold": 0.8,
+  "input_token_price_per_million": 3.0,
+  "output_token_price_per_million": 15.0,
+  "pricing_updated_at": "2026-03-15T10:00:00Z",
+  "cooldown_minutes": 30,
+  "updated_at": "2026-03-20T14:30:00Z",
+  "updated_by": "admin_user",
+  "api_key_configured": true,
+  "current_month_tokens": 45230,
+  "current_month_cost_usd": 1.82,
+  "budget_pct_used": 0.4523
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ai_enabled` | bool | Master on/off switch for all AI features |
+| `feature_general_analysis` | bool | Toggle for communication/conflict/sentiment analysis |
+| `feature_one_on_one_prep` | bool | Toggle for 1:1 prep brief generation |
+| `feature_team_health` | bool | Toggle for team health checks |
+| `feature_work_categorization` | bool | Toggle for AI batch classification on Investment page |
+| `monthly_token_budget` | int or null | Monthly token cap. `null` = unlimited |
+| `budget_warning_threshold` | float | Fraction (0-1) at which frontend shows budget warning |
+| `input_token_price_per_million` | float | Configurable input token pricing (USD) |
+| `output_token_price_per_million` | float | Configurable output token pricing (USD) |
+| `pricing_updated_at` | datetime or null | When pricing was last changed. `null` = using defaults |
+| `cooldown_minutes` | int | Dedup window — recent analysis results reused within this window |
+| `updated_at` | datetime | Last settings change timestamp |
+| `updated_by` | string or null | GitHub username of admin who last changed settings |
+| `api_key_configured` | bool | `true` if `ANTHROPIC_API_KEY` env var is set |
+| `current_month_tokens` | int | Total tokens used this calendar month |
+| `current_month_cost_usd` | float | Estimated cost this month based on configured pricing |
+| `budget_pct_used` | float or null | `current_month_tokens / monthly_token_budget`. `null` if no budget |
+
+### PATCH /api/ai/settings
+
+Update AI settings. All fields are optional — only provided fields are changed.
+
+**Request Body:**
+```json
+{
+  "ai_enabled": false,
+  "feature_work_categorization": false,
+  "monthly_token_budget": 200000,
+  "cooldown_minutes": 15
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ai_enabled` | bool | Master switch |
+| `feature_general_analysis` | bool | Toggle for general analysis |
+| `feature_one_on_one_prep` | bool | Toggle for 1:1 prep |
+| `feature_team_health` | bool | Toggle for team health |
+| `feature_work_categorization` | bool | Toggle for work categorization AI |
+| `monthly_token_budget` | int | Set monthly token cap |
+| `clear_budget` | bool | Set `true` to remove the budget limit (set to unlimited) |
+| `budget_warning_threshold` | float | Warning threshold (0.5-1.0) |
+| `input_token_price_per_million` | float | Input pricing — auto-sets `pricing_updated_at` |
+| `output_token_price_per_million` | float | Output pricing — auto-sets `pricing_updated_at` |
+| `cooldown_minutes` | int | Dedup cooldown window |
+
+**Response:** `200 OK` — Same schema as `GET /api/ai/settings` (returns updated settings with usage)
+
+### GET /api/ai/usage
+
+Usage breakdown by AI feature with daily timeseries.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `days` | int | `30` | Lookback period (1-365) |
+
+**Response:** `200 OK`
+```json
+{
+  "period_start": "2026-02-26T00:00:00Z",
+  "period_end": "2026-03-28T00:00:00Z",
+  "total_tokens": 45230,
+  "total_cost_usd": 1.82,
+  "budget_limit": 100000,
+  "budget_pct_used": 0.4523,
+  "features": [
+    {
+      "feature": "general_analysis",
+      "enabled": true,
+      "label": "General Analysis",
+      "description": "AI-powered communication, conflict, and sentiment analysis...",
+      "disabled_impact": "Admins cannot run communication, conflict, or sentiment analyses...",
+      "tokens_this_month": 12000,
+      "cost_this_month_usd": 0.48,
+      "call_count_this_month": 3,
+      "last_used_at": "2026-03-27T10:00:00Z"
+    }
+  ],
+  "daily_usage": [
+    {
+      "date": "2026-03-15",
+      "tokens": 5000,
+      "cost_usd": 0.18,
+      "calls": 2,
+      "by_feature": {
+        "general_analysis": { "tokens": 3000, "calls": 1 },
+        "one_on_one_prep": { "tokens": 2000, "calls": 1 }
+      }
+    }
+  ]
+}
+```
+
+`features` contains one entry per AI feature (general_analysis, one_on_one_prep, team_health, work_categorization) with current month usage and human-readable metadata.
+
+`daily_usage` contains one entry per day with non-zero usage, sorted chronologically.
+
+### POST /api/ai/estimate
+
+Estimate token usage and cost for an AI call without executing it. Does not call Claude.
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `feature` | string | Yes | `general_analysis`, `one_on_one_prep`, `team_health`, `work_categorization` |
+| `scope_type` | string | No | `developer`, `team`, `repo` (for general_analysis) |
+| `scope_id` | string | No | Entity ID (for general_analysis) |
+| `date_from` | datetime | No | Period start (defaults to 30 days ago) |
+| `date_to` | datetime | No | Period end (defaults to now) |
+
+**Response:** `200 OK`
+```json
+{
+  "estimated_input_tokens": 5000,
+  "estimated_output_tokens": 3000,
+  "estimated_cost_usd": 0.06,
+  "data_items": 45,
+  "note": "Based on 45 data items in scope"
+}
+```
+
+Estimation methods vary by feature:
+- `general_analysis`: Gathers actual data items and estimates tokens from volume
+- `one_on_one_prep`: Fixed estimate (~5K input, ~3K output) based on typical context size
+- `team_health`: Scales by active developer count (~200 tokens per dev + 3K base)
+- `work_categorization`: Max batch estimate (200 items)

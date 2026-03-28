@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -54,7 +56,7 @@ class Repository(Base):
     __tablename__ = "repositories"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     name: Mapped[str | None] = mapped_column(String(255))
     full_name: Mapped[str | None] = mapped_column(String(512), index=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -72,6 +74,7 @@ class Repository(Base):
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="repo")
     issues: Mapped[list["Issue"]] = relationship(back_populates="repo")
     tree_files: Mapped[list["RepoTreeFile"]] = relationship(back_populates="repo")
+    deployments: Mapped[list["Deployment"]] = relationship(back_populates="repo")
 
 
 class PullRequest(Base):
@@ -82,7 +85,7 @@ class PullRequest(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
     author_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
     number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -124,19 +127,22 @@ class PullRequest(Base):
     )
     reverted_pr_number: Mapped[int | None] = mapped_column(Integer)
     html_url: Mapped[str | None] = mapped_column(Text)
+    head_sha: Mapped[str | None] = mapped_column(String(40))
+    work_category: Mapped[str | None] = mapped_column(String(20))
 
     repo: Mapped["Repository"] = relationship(back_populates="pull_requests")
     author: Mapped["Developer | None"] = relationship(back_populates="pull_requests")
     reviews: Mapped[list["PRReview"]] = relationship(back_populates="pr")
     review_comments: Mapped[list["PRReviewComment"]] = relationship(back_populates="pr")
     files: Mapped[list["PRFile"]] = relationship(back_populates="pr")
+    check_runs: Mapped[list["PRCheckRun"]] = relationship(back_populates="pr")
 
 
 class PRReview(Base):
     __tablename__ = "pr_reviews"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     pr_id: Mapped[int] = mapped_column(
         ForeignKey("pull_requests.id"), nullable=False
     )
@@ -158,7 +164,7 @@ class PRReviewComment(Base):
     __tablename__ = "pr_review_comments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     pr_id: Mapped[int] = mapped_column(
         ForeignKey("pull_requests.id"), nullable=False
     )
@@ -167,6 +173,7 @@ class PRReviewComment(Base):
     body: Mapped[str | None] = mapped_column(Text)
     path: Mapped[str | None] = mapped_column(Text)
     line: Mapped[int | None] = mapped_column(Integer)
+    comment_type: Mapped[str | None] = mapped_column(String(30), server_default="general")
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -193,6 +200,29 @@ class PRFile(Base):
     pr: Mapped["PullRequest"] = relationship(back_populates="files")
 
 
+class PRCheckRun(Base):
+    __tablename__ = "pr_check_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "pr_id", "check_name", "run_attempt",
+            name="uq_pr_check_run_pr_name_attempt",
+        ),
+        Index("ix_pr_check_run_pr_id", "pr_id"),
+        Index("ix_pr_check_run_check_name", "check_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pr_id: Mapped[int] = mapped_column(ForeignKey("pull_requests.id"), nullable=False)
+    check_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    conclusion: Mapped[str | None] = mapped_column(String(30))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_s: Mapped[int | None] = mapped_column(Integer)
+    run_attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+    pr: Mapped["PullRequest"] = relationship(back_populates="check_runs")
+
+
 class RepoTreeFile(Base):
     __tablename__ = "repo_tree_files"
     __table_args__ = (
@@ -216,7 +246,7 @@ class Issue(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
     assignee_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
     number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -237,6 +267,7 @@ class Issue(Base):
     milestone_title: Mapped[str | None] = mapped_column(String(255))
     milestone_due_on: Mapped[datetime | None] = mapped_column(Date)
     reopen_count: Mapped[int] = mapped_column(Integer, server_default="0")
+    work_category: Mapped[str | None] = mapped_column(String(20))
 
     repo: Mapped["Repository"] = relationship(back_populates="issues")
     assignee: Mapped["Developer | None"] = relationship(back_populates="assigned_issues")
@@ -247,7 +278,7 @@ class IssueComment(Base):
     __tablename__ = "issue_comments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     issue_id: Mapped[int] = mapped_column(ForeignKey("issues.id"), nullable=False)
     author_github_username: Mapped[str | None] = mapped_column(String(255))
     body: Mapped[str | None] = mapped_column(Text)
@@ -261,14 +292,38 @@ class SyncEvent(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     sync_type: Mapped[str | None] = mapped_column(String(30))
-    status: Mapped[str | None] = mapped_column(String(20))
+    status: Mapped[str | None] = mapped_column(String(30))
     repos_synced: Mapped[int | None] = mapped_column(Integer)
     prs_upserted: Mapped[int | None] = mapped_column(Integer)
     issues_upserted: Mapped[int | None] = mapped_column(Integer)
-    errors: Mapped[dict | None] = mapped_column(JSONB)
+    errors: Mapped[list | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_s: Mapped[int | None] = mapped_column(Integer)
+
+    # Resumability and progress tracking
+    repo_ids: Mapped[list | None] = mapped_column(JSONB)
+    since_override: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    total_repos: Mapped[int | None] = mapped_column(Integer)
+    current_repo_name: Mapped[str | None] = mapped_column(String(512))
+    repos_completed: Mapped[list | None] = mapped_column(
+        JSONB, server_default="[]"
+    )
+    repos_failed: Mapped[list | None] = mapped_column(
+        JSONB, server_default="[]"
+    )
+    is_resumable: Mapped[bool] = mapped_column(
+        Boolean, server_default="false", default=False
+    )
+    resumed_from_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sync_events.id")
+    )
+    log_summary: Mapped[list | None] = mapped_column(
+        JSONB, server_default="[]"
+    )
+    rate_limit_wait_s: Mapped[int] = mapped_column(
+        Integer, server_default="0", default=0
+    )
 
 
 class AIAnalysis(Base):
@@ -285,6 +340,10 @@ class AIAnalysis(Base):
     raw_response: Mapped[str | None] = mapped_column(Text)
     model_used: Mapped[str | None] = mapped_column(String(100))
     tokens_used: Mapped[int | None] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Float)
+    reused_from_id: Mapped[int | None] = mapped_column(Integer)
     triggered_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
@@ -320,3 +379,77 @@ class DeveloperGoal(Base):
     )
 
     developer: Mapped["Developer"] = relationship(back_populates="goals")
+
+
+class Deployment(Base):
+    __tablename__ = "deployments"
+    __table_args__ = (
+        UniqueConstraint(
+            "repo_id", "workflow_run_id",
+            name="uq_deployment_repo_run",
+        ),
+        Index("ix_deployment_repo_id", "repo_id"),
+        Index("ix_deployment_deployed_at", "deployed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
+    environment: Mapped[str | None] = mapped_column(String(100))
+    sha: Mapped[str | None] = mapped_column(String(40))
+    deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    workflow_name: Mapped[str | None] = mapped_column(String(255))
+    workflow_run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str | None] = mapped_column(String(30))
+    lead_time_s: Mapped[int | None] = mapped_column(Integer)
+
+    repo: Mapped["Repository"] = relationship(back_populates="deployments")
+
+
+class AISettings(Base):
+    __tablename__ = "ai_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ai_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    feature_general_analysis: Mapped[bool] = mapped_column(
+        Boolean, server_default="true"
+    )
+    feature_one_on_one_prep: Mapped[bool] = mapped_column(
+        Boolean, server_default="true"
+    )
+    feature_team_health: Mapped[bool] = mapped_column(
+        Boolean, server_default="true"
+    )
+    feature_work_categorization: Mapped[bool] = mapped_column(
+        Boolean, server_default="true"
+    )
+    monthly_token_budget: Mapped[int | None] = mapped_column(Integer)
+    budget_warning_threshold: Mapped[float] = mapped_column(
+        Float, server_default="0.8"
+    )
+    input_token_price_per_million: Mapped[float] = mapped_column(
+        Float, server_default="3.0"
+    )
+    output_token_price_per_million: Mapped[float] = mapped_column(
+        Float, server_default="15.0"
+    )
+    pricing_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, server_default="30")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class AIUsageLog(Base):
+    __tablename__ = "ai_usage_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    feature: Mapped[str] = mapped_column(String(50), nullable=False)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    items_classified: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
