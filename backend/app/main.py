@@ -1,0 +1,71 @@
+import logging
+from contextlib import asynccontextmanager
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api import ai_analysis, developers, goals, stats, sync, webhooks
+from app.config import settings
+from app.services.github_sync import run_sync
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup — schedule sync jobs
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_sync,
+        "interval",
+        args=["incremental"],
+        minutes=settings.sync_interval_minutes,
+        id="incremental_sync",
+    )
+    scheduler.add_job(
+        run_sync,
+        "cron",
+        args=["full"],
+        hour=settings.full_sync_cron_hour,
+        id="full_sync",
+    )
+    scheduler.start()
+    logger.info(
+        "Scheduler started: incremental every %dm, full at %d:00",
+        settings.sync_interval_minutes,
+        settings.full_sync_cron_hour,
+    )
+
+    yield
+
+    # Shutdown
+    scheduler.shutdown(wait=True)
+
+
+app = FastAPI(
+    title="DevPulse",
+    description="Engineering intelligence dashboard",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(developers.router, prefix="/api", tags=["developers"])
+app.include_router(stats.router, prefix="/api", tags=["stats"])
+app.include_router(sync.router, prefix="/api", tags=["sync"])
+app.include_router(webhooks.router, prefix="/api", tags=["webhooks"])
+app.include_router(goals.router, prefix="/api", tags=["goals"])
+app.include_router(ai_analysis.router, prefix="/api", tags=["ai"])
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
