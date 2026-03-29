@@ -14,6 +14,7 @@ from app.schemas.schemas import (
     CIStatsResponse,
     CodeChurnResponse,
     DORAMetricsResponse,
+    CollaborationPairDetail,
     CollaborationResponse,
     CollaborationTrendsResponse,
     DeveloperStatsResponse,
@@ -30,7 +31,7 @@ from app.schemas.schemas import (
     WorkAllocationResponse,
     WorkloadResponse,
 )
-from app.services.collaboration import get_collaboration, get_collaboration_trends
+from app.services.collaboration import get_collaboration, get_collaboration_pair_detail, get_collaboration_trends
 from app.services.risk import get_pr_risk, get_risk_summary
 from app.services.work_category import get_work_allocation
 from app.services.stats import (
@@ -158,6 +159,18 @@ async def collaboration_trends(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_collaboration_trends(db, team, date_from, date_to)
+
+
+@router.get("/stats/collaboration/pair", response_model=CollaborationPairDetail)
+async def collaboration_pair_detail(
+    reviewer_id: int = Query(...),
+    author_id: int = Query(...),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_collaboration_pair_detail(db, reviewer_id, author_id, date_from, date_to)
 
 
 @router.get("/stats/stale-prs", response_model=StalePRsResponse)

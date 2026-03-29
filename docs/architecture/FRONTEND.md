@@ -35,6 +35,7 @@ All routes defined in `frontend/src/App.tsx`.
 | `/admin/sync/:id` | `SyncDetailPage` | Admin | SidebarLayout |
 | `/admin/ai` | `AIAnalysis` | Admin | SidebarLayout |
 | `/admin/ai/settings` | `AISettingsPage` | Admin | SidebarLayout |
+| `/admin/slack` | `SlackSettingsPage` | Admin | SidebarLayout |
 
 Bare `/insights` and `/admin` redirect to first sub-page. `ProtectedRoute` checks for `devpulse_token` in localStorage.
 
@@ -47,14 +48,17 @@ App
       └─ AppRoutes
          └─ AuthContext.Provider
             └─ DateRangeContext.Provider
-               ├─ Login / AuthCallback (unprotected)
+               ├─ Login / AuthCallback (unprotected, eagerly loaded)
                └─ ProtectedRoute
                   └─ Layout (sticky header, top nav, date picker)
-                     └─ ErrorBoundary (single, app-wide)
-                        ├─ Dashboard / ExecutiveDashboard / TeamRegistry / DeveloperDetail / Goals
-                        ├─ SidebarLayout (insights) → 8 sub-pages
-                        └─ SidebarLayout (admin) → 4 sub-pages
+                     └─ Suspense (fallback: PageSkeleton)
+                        └─ ErrorBoundary (global fallback)
+                           ├─ ErrorBoundary → Dashboard / ExecutiveDashboard / DeveloperDetail / Goals (per-page)
+                           ├─ SidebarLayout (insights) → ErrorBoundary → 9 lazy sub-pages
+                           └─ SidebarLayout (admin) → ErrorBoundary → 7 lazy sub-pages
 ```
+
+All page components are lazy-loaded via `React.lazy()`. Layout, SidebarLayout, and hooks are eagerly loaded.
 
 ### Layout (`components/Layout.tsx`)
 
@@ -193,6 +197,21 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useOrgTree(team?)` | `GET /org-tree` | Full org hierarchy tree |
 | `useWorksWith(devId, dateFrom?, dateTo?)` | `GET /developers/:id/works-with` | Top collaborators with multi-signal scores |
 
+### Slack Integration (`hooks/useSlack.ts`)
+
+| Hook | Endpoint | Notes |
+|------|----------|-------|
+| `useSlackConfig()` | `GET /slack/config` | Admin only. Global Slack settings. |
+| `useUpdateSlackConfig()` | `PATCH /slack/config` | Admin only. Cache update + toast. |
+| `useSlackTest()` | `POST /slack/test` | Admin only. Send test message. |
+| `useNotificationHistory(limit?, offset?)` | `GET /slack/notifications` | Admin only. Notification audit log. |
+| `useSlackUserSettings()` | `GET /slack/user-settings` | Current user's DM preferences. |
+| `useUpdateSlackUserSettings()` | `PATCH /slack/user-settings` | Current user. Cache update + toast. |
+
+`SlackSettingsPage` (`/admin/slack`): Admin-only page following the AISettings pattern — connection banner, master toggle, per-notification-type cards, threshold config, schedule config, notification history table. Auto-saves with debounced (500ms) and immediate (toggles) patterns.
+
+`SlackPreferencesSection`: Renders on DeveloperDetail for the user's own profile. Shows Slack user ID input and per-notification-type toggles.
+
 ## API Integration (`utils/api.ts`)
 
 `apiFetch(path, options?)`: wraps `fetch`, prepends `/api`, injects Bearer token. On 401: clears token, redirects to `/login`. Other errors: throws `ApiError(status, detail)` where `detail` is parsed JSON (`body.detail ?? body`) or raw text fallback.
@@ -232,19 +251,19 @@ All Recharts 3 with `ResponsiveContainer`:
 ### Error
 
 - `ErrorCard`: Inline error with optional retry button
-- `ErrorBoundary`: Single instance wrapping entire protected route tree. Catches render errors, shows "Something went wrong" with "Try Again" (resets state) and "Go to Dashboard" link.
+- `ErrorBoundary`: Per-route and per-section wrappers (Dashboard, ExecutiveDashboard, DeveloperDetail, Goals each wrapped individually; Insights and Admin sidebar content each have their own boundary). Global boundary kept as last-resort fallback. A crash in one page only affects that page — header, nav, and sidebar remain functional.
 
 ## Architectural Concerns
 
 | Severity | Area | Description |
 |----------|------|-------------|
-| High | Error isolation | Single global `ErrorBoundary` -- any page crash takes down entire UI |
-| Medium | Bug | `useCIStats` -- `repoId` filter never appended to query string (calls `.set()` on string) |
-| Medium | React rules | `CostEstimateLine` in `AIAnalysis.tsx` calls mutation inside `useState` initializer (should be `useEffect`) |
+| ~~High~~ | ~~Error isolation~~ | ~~Single global `ErrorBoundary` -- any page crash takes down entire UI~~ — **Resolved:** Per-route ErrorBoundary wrappers isolate failures by section |
+| ~~Medium~~ | ~~Bug~~ | ~~`useCIStats` -- `repoId` filter never appended to query string~~ — **Resolved:** Builds `URLSearchParams` directly |
+| ~~Medium~~ | ~~React rules~~ | ~~`CostEstimateLine` calls mutation inside `useState` initializer~~ — **Resolved:** Replaced with `useEffect` |
 | Medium | Error handling | Some older callers still detect status codes via `error.message.includes('409')` instead of using `ApiError.status` |
-| Medium | Performance | No lazy loading (`React.lazy`) -- all 30+ page components bundled in initial download |
-| Medium | Duplication | `AlertStrip` and `SortableHead` sub-components copy-pasted between `Dashboard.tsx` and `WorkloadOverview.tsx` |
-| Low | Duplication | `CATEGORY_CONFIG` / `CATEGORY_ORDER` defined identically in `ExecutiveDashboard.tsx` and `Investment.tsx` |
+| ~~Medium~~ | ~~Performance~~ | ~~No lazy loading -- all 30+ page components bundled in initial download~~ — **Resolved:** All pages use `React.lazy()` with `Suspense` fallback |
+| ~~Medium~~ | ~~Duplication~~ | ~~`AlertStrip` and `SortableHead` copy-pasted between Dashboard and WorkloadOverview~~ — **Resolved:** Extracted to `components/AlertStrip.tsx` and `components/SortableHead.tsx` |
+| ~~Low~~ | ~~Duplication~~ | ~~`CATEGORY_CONFIG` / `CATEGORY_ORDER` duplicated in ExecutiveDashboard and Investment~~ — **Resolved:** Extracted to `utils/categoryConfig.ts` |
 | Low | Design system | Several pages use native `<select>` elements instead of shadcn/ui `Select` -- visual inconsistency |
 | Low | Dead code | `SyncStatus.tsx` imports non-existent `useTriggerSync` -- orphaned file |
 | Low | Cache key | `useToggleTracking` invalidates non-existent `['sync-repos']` key |

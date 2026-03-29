@@ -28,6 +28,7 @@ This directory contains interconnected architecture documents for DevPulse. Gene
 | How stats are computed | [SERVICE-LAYER.md](SERVICE-LAYER.md) | Key algorithms |
 | How AI analysis works | [DATA-FLOWS.md](DATA-FLOWS.md) | AI analysis lifecycle |
 | How auth works | [DATA-FLOWS.md](DATA-FLOWS.md) | Auth flow |
+| How Slack notifications work | [DATA-FLOWS.md](DATA-FLOWS.md) | Slack notification flow |
 
 ## Related References
 

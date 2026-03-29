@@ -18,14 +18,7 @@ from app.schemas.schemas import (
 )
 
 
-def _default_range(
-    date_from: datetime | None, date_to: datetime | None
-) -> tuple[datetime, datetime]:
-    if not date_to:
-        date_to = datetime.now(timezone.utc)
-    if not date_from:
-        date_from = date_to - timedelta(days=30)
-    return date_from, date_to
+from app.services.utils import default_range as _default_range
 
 
 def _risk_level(score: float) -> str:

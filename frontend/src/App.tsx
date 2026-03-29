@@ -1,4 +1,4 @@
-import { useState, useContext } from 'react'
+import { useState, useContext, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'sonner'
@@ -7,28 +7,42 @@ import { AuthContext, useAuthProvider } from '@/hooks/useAuth'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import Layout from '@/components/Layout'
 import SidebarLayout from '@/components/SidebarLayout'
-import Dashboard from '@/pages/Dashboard'
-import TeamRegistry from '@/pages/TeamRegistry'
-import DeveloperDetail from '@/pages/DeveloperDetail'
-import Repos from '@/pages/Repos'
-import SyncPage from '@/pages/sync/SyncPage'
-import SyncDetailPage from '@/pages/sync/SyncDetailPage'
-import AIAnalysis from '@/pages/AIAnalysis'
-import Goals from '@/pages/Goals'
-import WorkloadOverview from '@/pages/insights/WorkloadOverview'
-import CollaborationMatrix from '@/pages/insights/CollaborationMatrix'
-import Benchmarks from '@/pages/insights/Benchmarks'
-import IssueQuality from '@/pages/insights/IssueQuality'
-import CodeChurn from '@/pages/insights/CodeChurn'
-import CIInsights from '@/pages/insights/CIInsights'
-import DoraMetrics from '@/pages/insights/DoraMetrics'
-import Investment from '@/pages/insights/Investment'
-import OrgChart from '@/pages/insights/OrgChart'
-import ExecutiveDashboard from '@/pages/ExecutiveDashboard'
-import AISettingsPage from '@/pages/settings/AISettings'
+import StatCardSkeleton from '@/components/StatCardSkeleton'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 import type { SidebarItem } from '@/components/SidebarLayout'
+
+// Lazy-loaded page components
+const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const TeamRegistry = lazy(() => import('@/pages/TeamRegistry'))
+const DeveloperDetail = lazy(() => import('@/pages/DeveloperDetail'))
+const Repos = lazy(() => import('@/pages/Repos'))
+const SyncPage = lazy(() => import('@/pages/sync/SyncPage'))
+const SyncDetailPage = lazy(() => import('@/pages/sync/SyncDetailPage'))
+const AIAnalysis = lazy(() => import('@/pages/AIAnalysis'))
+const Goals = lazy(() => import('@/pages/Goals'))
+const WorkloadOverview = lazy(() => import('@/pages/insights/WorkloadOverview'))
+const CollaborationMatrix = lazy(() => import('@/pages/insights/CollaborationMatrix'))
+const CollaborationPairPage = lazy(() => import('@/pages/insights/CollaborationPairPage'))
+const Benchmarks = lazy(() => import('@/pages/insights/Benchmarks'))
+const IssueQuality = lazy(() => import('@/pages/insights/IssueQuality'))
+const CodeChurn = lazy(() => import('@/pages/insights/CodeChurn'))
+const CIInsights = lazy(() => import('@/pages/insights/CIInsights'))
+const DoraMetrics = lazy(() => import('@/pages/insights/DoraMetrics'))
+const Investment = lazy(() => import('@/pages/insights/Investment'))
+const OrgChart = lazy(() => import('@/pages/insights/OrgChart'))
+const ExecutiveDashboard = lazy(() => import('@/pages/ExecutiveDashboard'))
+const AISettingsPage = lazy(() => import('@/pages/settings/AISettings'))
+const SlackSettingsPage = lazy(() => import('@/pages/settings/SlackSettings'))
+
+function PageSkeleton() {
+  return (
+    <div className="mx-auto max-w-7xl space-y-4 px-4 py-6">
+      <StatCardSkeleton />
+      <StatCardSkeleton />
+    </div>
+  )
+}
 
 const insightsSidebarItems: SidebarItem[] = [
   { to: '/insights/workload', label: 'Workload' },
@@ -48,6 +62,7 @@ const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/sync', label: 'Sync' },
   { to: '/admin/ai', label: 'AI Analysis' },
   { to: '/admin/ai/settings', label: 'AI Settings' },
+  { to: '/admin/slack', label: 'Slack' },
 ]
 
 const queryClient = new QueryClient({
@@ -87,30 +102,34 @@ function AppRoutes() {
             element={
               <ProtectedRoute>
                 <Layout>
+                  <Suspense fallback={<PageSkeleton />}>
                   <ErrorBoundary>
                     <Routes>
-                      <Route path="/" element={auth.isAdmin ? <Dashboard /> : <Navigate to={`/team/${auth.user?.developer_id}`} replace />} />
-                      <Route path="/executive" element={auth.isAdmin ? <ExecutiveDashboard /> : <Navigate to="/" replace />} />
+                      <Route path="/" element={<ErrorBoundary>{auth.isAdmin ? <Dashboard /> : <Navigate to={`/team/${auth.user?.developer_id}`} replace />}</ErrorBoundary>} />
+                      <Route path="/executive" element={auth.isAdmin ? <ErrorBoundary><ExecutiveDashboard /></ErrorBoundary> : <Navigate to="/" replace />} />
                       <Route path="/team" element={<Navigate to="/admin/team" replace />} />
-                      <Route path="/team/:id" element={<DeveloperDetail />} />
-                      <Route path="/goals" element={<Goals />} />
+                      <Route path="/team/:id" element={<ErrorBoundary><DeveloperDetail /></ErrorBoundary>} />
+                      <Route path="/goals" element={<ErrorBoundary><Goals /></ErrorBoundary>} />
 
                       {/* Insights — sidebar layout */}
                       <Route path="/insights/*" element={
                         auth.isAdmin ? (
                           <SidebarLayout items={insightsSidebarItems} title="Insights">
-                            <Routes>
-                              <Route path="/workload" element={<WorkloadOverview />} />
-                              <Route path="/collaboration" element={<CollaborationMatrix />} />
-                              <Route path="/benchmarks" element={<Benchmarks />} />
-                              <Route path="/issue-quality" element={<IssueQuality />} />
-                              <Route path="/code-churn" element={<CodeChurn />} />
-                              <Route path="/cicd" element={<CIInsights />} />
-                              <Route path="/dora" element={<DoraMetrics />} />
-                              <Route path="/investment" element={<Investment />} />
-                              <Route path="/org-chart" element={<OrgChart />} />
-                              <Route path="*" element={<Navigate to="/insights/workload" replace />} />
-                            </Routes>
+                            <ErrorBoundary>
+                              <Routes>
+                                <Route path="/workload" element={<WorkloadOverview />} />
+                                <Route path="/collaboration" element={<CollaborationMatrix />} />
+                                <Route path="/collaboration/:reviewerId/:authorId" element={<CollaborationPairPage />} />
+                                <Route path="/benchmarks" element={<Benchmarks />} />
+                                <Route path="/issue-quality" element={<IssueQuality />} />
+                                <Route path="/code-churn" element={<CodeChurn />} />
+                                <Route path="/cicd" element={<CIInsights />} />
+                                <Route path="/dora" element={<DoraMetrics />} />
+                                <Route path="/investment" element={<Investment />} />
+                                <Route path="/org-chart" element={<OrgChart />} />
+                                <Route path="*" element={<Navigate to="/insights/workload" replace />} />
+                              </Routes>
+                            </ErrorBoundary>
                           </SidebarLayout>
                         ) : <Navigate to="/" replace />
                       } />
@@ -119,20 +138,24 @@ function AppRoutes() {
                       <Route path="/admin/*" element={
                         auth.isAdmin ? (
                           <SidebarLayout items={adminSidebarItems} title="Admin">
-                            <Routes>
-                              <Route path="/team" element={<TeamRegistry />} />
-                              <Route path="/repos" element={<Repos />} />
-                              <Route path="/sync" element={<SyncPage />} />
-                              <Route path="/sync/:id" element={<SyncDetailPage />} />
-                              <Route path="/ai" element={<AIAnalysis />} />
-                              <Route path="/ai/settings" element={<AISettingsPage />} />
-                              <Route path="*" element={<Navigate to="/admin/team" replace />} />
-                            </Routes>
+                            <ErrorBoundary>
+                              <Routes>
+                                <Route path="/team" element={<TeamRegistry />} />
+                                <Route path="/repos" element={<Repos />} />
+                                <Route path="/sync" element={<SyncPage />} />
+                                <Route path="/sync/:id" element={<SyncDetailPage />} />
+                                <Route path="/ai" element={<AIAnalysis />} />
+                                <Route path="/ai/settings" element={<AISettingsPage />} />
+                                <Route path="/slack" element={<SlackSettingsPage />} />
+                                <Route path="*" element={<Navigate to="/admin/team" replace />} />
+                              </Routes>
+                            </ErrorBoundary>
                           </SidebarLayout>
                         ) : <Navigate to="/" replace />
                       } />
                     </Routes>
                   </ErrorBoundary>
+                  </Suspense>
                 </Layout>
               </ProtectedRoute>
             }

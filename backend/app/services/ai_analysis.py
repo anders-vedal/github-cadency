@@ -3,7 +3,6 @@ import logging
 from datetime import datetime, timezone
 
 import anthropic
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -282,9 +281,9 @@ async def run_analysis(
 
     budget_info = await check_budget(db, ai_settings)
     if budget_info["over_budget"]:
-        raise HTTPException(
-            status_code=429, detail="Monthly AI token budget exceeded"
-        )
+        from app.services.exceptions import AIBudgetExceededError
+
+        raise AIBudgetExceededError()
 
     # Dedup: return cached result if recent (unless force=True)
     if not force:
@@ -347,7 +346,11 @@ async def run_analysis(
     system_prompt = SYSTEM_PROMPTS[analysis_type]
     user_content = json.dumps(items, indent=2)
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        max_retries=3,
+        timeout=120.0,
+    )
     response = await client.messages.create(
         model=MODEL,
         max_tokens=4096,
@@ -419,7 +422,11 @@ async def _call_claude_and_store(
     """Shared helper: call Claude API, parse JSON response, store in ai_analyses."""
     from app.services.ai_settings import compute_cost, get_ai_settings
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        max_retries=3,
+        timeout=120.0,
+    )
     response = await client.messages.create(
         model=MODEL,
         max_tokens=4096,
@@ -524,9 +531,9 @@ async def run_one_on_one_prep(
 
     budget_info = await check_budget(db, ai_settings)
     if budget_info["over_budget"]:
-        raise HTTPException(
-            status_code=429, detail="Monthly AI token budget exceeded"
-        )
+        from app.services.exceptions import AIBudgetExceededError
+
+        raise AIBudgetExceededError()
 
     if not force:
         recent = await find_recent_analysis(
@@ -759,9 +766,9 @@ async def run_team_health(
 
     budget_info = await check_budget(db, ai_settings)
     if budget_info["over_budget"]:
-        raise HTTPException(
-            status_code=429, detail="Monthly AI token budget exceeded"
-        )
+        from app.services.exceptions import AIBudgetExceededError
+
+        raise AIBudgetExceededError()
 
     scope_id = team or "all"
     if not force:

@@ -108,14 +108,58 @@ sent_at, developer_id (nullable)
 - Mock Slack API for integration tests
 - Test OAuth flow with mock Slack endpoints
 
+## Status
+
+**Completed** — implemented 2026-03-29.
+
+### Deviations from Original Spec
+
+- **No OAuth flow**: Used manual bot token approach instead of Slack App OAuth. Admin pastes `xoxb-` token from their Slack App settings. Simpler, covers all use cases, upgradable to OAuth later.
+- **DMs instead of channel routing**: Per user request, notifications go as DMs to individual developers (via Slack user ID) rather than fixed channel routing. Each developer configures their own Slack user ID and notification preferences.
+- **No rate limiting**: Deferred — relies on daily/weekly cron schedule as natural dedup. Can add `notification_log` dedup checks later if spam becomes an issue.
+- **Bot token not encrypted at rest**: Stored as plaintext in DB for now (app not in production). `cryptography` package already in requirements for future Fernet encryption.
+- **No interactive messages (Phase 2)**: Snooze buttons, "View PR" actions deferred to future work.
+- **Uses `slack_sdk`**: Instead of plain webhooks, uses `slack_sdk.web.async_client.AsyncWebClient` for full DM + channel support.
+
 ## Acceptance Criteria
-- [ ] Slack App OAuth flow works (install/disconnect)
-- [ ] Stale PR nudges sent daily for PRs exceeding threshold
-- [ ] High-risk PR alerts on new PRs above risk threshold
-- [ ] Workload alerts when developers become overloaded
-- [ ] Sync status notifications (success/failure)
-- [ ] Weekly digest with key metric summaries
-- [ ] Per-notification-type channel routing and enable/disable
-- [ ] Rate limiting prevents notification spam
-- [ ] Admin-only configuration page
-- [ ] Bot tokens encrypted at rest
+- [n/a] ~~Slack App OAuth flow works (install/disconnect)~~ — replaced with manual bot token
+- [x] Stale PR nudges sent daily for PRs exceeding threshold
+- [x] High-risk PR alerts on new PRs above risk threshold
+- [x] Workload alerts when developers become overloaded
+- [x] Sync status notifications (success/failure)
+- [x] Weekly digest with key metric summaries
+- [x] Per-notification-type enable/disable (global + per-user)
+- [ ] Rate limiting prevents notification spam — deferred
+- [x] Admin-only configuration page
+- [ ] Bot tokens encrypted at rest — deferred (not in production)
+
+## Files Created
+
+| File | Purpose |
+|------|---------|
+| `backend/app/services/slack.py` | Slack service: config CRUD, user settings, notification senders, scheduled jobs |
+| `backend/app/api/slack.py` | 7 API endpoints for Slack config, test, user settings, notification history |
+| `backend/migrations/versions/019_add_slack_integration.py` | 3 new tables: slack_config, slack_user_settings, notification_log |
+| `backend/tests/unit/test_slack_service.py` | 11 unit tests for service functions |
+| `backend/tests/integration/test_slack_api.py` | 14 integration tests for API endpoints |
+| `frontend/src/pages/settings/SlackSettings.tsx` | Admin Slack settings page |
+| `frontend/src/hooks/useSlack.ts` | 6 TanStack Query hooks for Slack API |
+| `frontend/src/components/SlackPreferencesSection.tsx` | Per-user notification preferences on DeveloperDetail |
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `backend/app/models/models.py` | +3 ORM models: SlackConfig, SlackUserSettings, NotificationLog |
+| `backend/app/schemas/schemas.py` | +9 Pydantic schemas for Slack |
+| `backend/app/main.py` | Router registration + 2 hourly scheduler jobs |
+| `backend/app/services/github_sync.py` | Post-sync Slack notification hook |
+| `backend/requirements.txt` | +slack_sdk==3.34.0 |
+| `frontend/src/utils/types.ts` | +7 TypeScript interfaces for Slack |
+| `frontend/src/App.tsx` | Route + sidebar item for /admin/slack |
+| `frontend/src/components/Layout.tsx` | Admin dropdown item |
+| `frontend/src/pages/DeveloperDetail.tsx` | SlackPreferencesSection integration |
+
+## Packages Added
+
+- `slack_sdk==3.34.0` (backend) — Slack Web API async client for DMs and channel messages

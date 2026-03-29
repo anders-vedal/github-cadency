@@ -31,21 +31,21 @@ class Developer(Base):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255))
     role: Mapped[str | None] = mapped_column(String(50))
-    skills: Mapped[dict | None] = mapped_column(JSONB)
+    skills: Mapped[list | None] = mapped_column(JSONB)
     specialty: Mapped[str | None] = mapped_column(String(255))
     location: Mapped[str | None] = mapped_column(String(255))
     timezone: Mapped[str | None] = mapped_column(String(50))
     team: Mapped[str | None] = mapped_column(String(255))
-    app_role: Mapped[str] = mapped_column(String(20), nullable=False, default="developer")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    app_role: Mapped[str] = mapped_column(String(20), nullable=False, default="developer", server_default="developer")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     avatar_url: Mapped[str | None] = mapped_column(Text)
     office: Mapped[str | None] = mapped_column(String(255))
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
     )
 
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="author")
@@ -69,14 +69,14 @@ class Repository(Base):
     full_name: Mapped[str | None] = mapped_column(String(512), index=True)
     description: Mapped[str | None] = mapped_column(Text)
     language: Mapped[str | None] = mapped_column(String(100))
-    is_tracked: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_tracked: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     default_branch: Mapped[str | None] = mapped_column(String(255))
     tree_truncated: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false"
     )
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
 
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="repo")
@@ -90,10 +90,13 @@ class PullRequest(Base):
     __table_args__ = (
         UniqueConstraint("repo_id", "number", name="uq_pr_repo_number"),
         Index("ix_pr_author_created", "author_id", "created_at"),
+        Index("ix_pr_state", "state"),
+        Index("ix_pr_merged_at", "merged_at"),
+        Index("ix_pr_repo_id", "repo_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
     author_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
     number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -149,6 +152,10 @@ class PullRequest(Base):
 
 class PRReview(Base):
     __tablename__ = "pr_reviews"
+    __table_args__ = (
+        Index("ix_pr_review_pr_id", "pr_id"),
+        Index("ix_pr_review_submitted_at", "submitted_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
@@ -254,10 +261,12 @@ class Issue(Base):
     __tablename__ = "issues"
     __table_args__ = (
         UniqueConstraint("repo_id", "number", name="uq_issue_repo_number"),
+        Index("ix_issue_state", "state"),
+        Index("ix_issue_assignee_id", "assignee_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
     assignee_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
     assignee_github_username: Mapped[str | None] = mapped_column(String(255))
@@ -265,7 +274,7 @@ class Issue(Base):
     title: Mapped[str | None] = mapped_column(Text)
     body: Mapped[str | None] = mapped_column(Text)
     state: Mapped[str | None] = mapped_column(String(20))
-    labels: Mapped[dict | None] = mapped_column(JSONB)
+    labels: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -302,6 +311,9 @@ class IssueComment(Base):
 
 class SyncEvent(Base):
     __tablename__ = "sync_events"
+    __table_args__ = (
+        Index("ix_sync_event_status", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     sync_type: Mapped[str | None] = mapped_column(String(30))
@@ -336,6 +348,9 @@ class SyncEvent(Base):
     resumed_from_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_events.id")
     )
+    resumed_from: Mapped["SyncEvent | None"] = relationship(
+        remote_side="SyncEvent.id", foreign_keys=[resumed_from_id]
+    )
     cancel_requested: Mapped[bool] = mapped_column(
         Boolean, server_default="false", default=False
     )
@@ -367,7 +382,7 @@ class AIAnalysis(Base):
     reused_from_id: Mapped[int | None] = mapped_column(Integer)
     triggered_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
 
 
@@ -383,14 +398,14 @@ class DeveloperGoal(Base):
     metric_key: Mapped[str] = mapped_column(String(100), nullable=False)
     target_value: Mapped[float] = mapped_column(Float, nullable=False)
     target_direction: Mapped[str] = mapped_column(
-        String(10), nullable=False, default="above"
+        String(10), nullable=False, default="above", server_default="above"
     )
     baseline_value: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(
         String(20), default="active", server_default="active"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
     target_date: Mapped[datetime | None] = mapped_column(Date)
     achieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -422,8 +437,18 @@ class Deployment(Base):
     workflow_run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str | None] = mapped_column(String(30))
     lead_time_s: Mapped[int | None] = mapped_column(Integer)
+    is_failure: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    failure_detected_via: Mapped[str | None] = mapped_column(String(30))
+    recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovery_deployment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("deployments.id"), nullable=True
+    )
+    recovery_time_s: Mapped[int | None] = mapped_column(Integer)
 
     repo: Mapped["Repository"] = relationship(back_populates="deployments")
+    recovery_deployment: Mapped["Deployment | None"] = relationship(
+        remote_side="Deployment.id", foreign_keys=[recovery_deployment_id]
+    )
 
 
 class AISettings(Base):
@@ -472,7 +497,7 @@ class AIUsageLog(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     items_classified: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
 
 
@@ -499,10 +524,10 @@ class DeveloperRelationship(Base):
     relationship_type: Mapped[str] = mapped_column(String(30), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
     )
 
     source: Mapped["Developer"] = relationship(
@@ -535,19 +560,98 @@ class DeveloperCollaborationScore(Base):
     developer_b_id: Mapped[int] = mapped_column(
         ForeignKey("developers.id"), nullable=False
     )
+    developer_a: Mapped["Developer"] = relationship(
+        foreign_keys=[developer_a_id]
+    )
+    developer_b: Mapped["Developer"] = relationship(
+        foreign_keys=[developer_b_id]
+    )
     period_start: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
     period_end: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    review_score: Mapped[float] = mapped_column(Float, default=0.0)
-    coauthor_score: Mapped[float] = mapped_column(Float, default=0.0)
-    issue_comment_score: Mapped[float] = mapped_column(Float, default=0.0)
-    mention_score: Mapped[float] = mapped_column(Float, default=0.0)
-    co_assigned_score: Mapped[float] = mapped_column(Float, default=0.0)
-    total_score: Mapped[float] = mapped_column(Float, default=0.0)
-    interaction_count: Mapped[int] = mapped_column(Integer, default=0)
+    review_score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
+    coauthor_score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
+    issue_comment_score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
+    mention_score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
+    co_assigned_score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
+    total_score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
+    interaction_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+
+class SlackConfig(Base):
+    """Singleton (id=1) global Slack integration configuration."""
+    __tablename__ = "slack_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slack_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    bot_token: Mapped[str | None] = mapped_column(Text)
+    default_channel: Mapped[str | None] = mapped_column(String(255))
+    notify_stale_prs: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    notify_high_risk_prs: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    notify_workload_alerts: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    notify_sync_failures: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    notify_sync_complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    notify_weekly_digest: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    stale_pr_days_threshold: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    risk_score_threshold: Mapped[float] = mapped_column(Float, default=0.7, server_default="0.7")
+    digest_day_of_week: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    digest_hour_utc: Mapped[int] = mapped_column(Integer, default=9, server_default="9")
+    stale_check_hour_utc: Mapped[int] = mapped_column(Integer, default=9, server_default="9")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class SlackUserSettings(Base):
+    """Per-developer Slack notification preferences and Slack user ID."""
+    __tablename__ = "slack_user_settings"
+    __table_args__ = (
+        UniqueConstraint("developer_id", name="uq_slack_user_dev"),
+        Index("ix_slack_user_dev", "developer_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    developer_id: Mapped[int] = mapped_column(
+        ForeignKey("developers.id"), nullable=False
+    )
+    slack_user_id: Mapped[str | None] = mapped_column(String(50))
+    notify_stale_prs: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    notify_high_risk_prs: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    notify_workload_alerts: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    notify_weekly_digest: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class NotificationLog(Base):
+    """Audit trail for sent Slack notifications."""
+    __tablename__ = "notification_log"
+    __table_args__ = (
+        Index("ix_notification_log_type", "notification_type"),
+        Index("ix_notification_log_created", "created_at"),
+        Index("ix_notification_log_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    notification_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    channel: Mapped[str | None] = mapped_column(String(255))
+    recipient_developer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("developers.id")
+    )
+    status: Mapped[str] = mapped_column(String(20), server_default="sent")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

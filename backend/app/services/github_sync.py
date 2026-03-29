@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import jwt
+import sqlalchemy as sa
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1497,7 +1498,11 @@ async def compute_deployment_lead_times(
     """
     result = await db.execute(
         select(Deployment)
-        .where(Deployment.repo_id == repo.id, Deployment.deployed_at.isnot(None))
+        .where(
+            Deployment.repo_id == repo.id,
+            Deployment.deployed_at.isnot(None),
+            Deployment.status == "success",
+        )
         .order_by(Deployment.deployed_at.asc())
     )
     deployments = list(result.scalars().all())
@@ -1555,7 +1560,7 @@ async def sync_deployments(
             {
                 "event": "push",
                 "branch": branch,
-                "status": "success",
+                "status": "completed",
                 "per_page": "100",
                 "page": str(page),
             },
@@ -1581,8 +1586,132 @@ async def sync_deployments(
     if count > 0:
         await db.flush()
         await compute_deployment_lead_times(db, repo)
+        await detect_deployment_failures(db, repo)
 
     return count
+
+
+async def detect_deployment_failures(
+    db: AsyncSession, repo: Repository
+) -> None:
+    """Detect deployment failures and link recoveries for CFR/MTTR.
+
+    Three failure signals:
+    1. Failed workflow runs (conclusion != "success")
+    2. Revert PRs merged within 48h after a successful deployment
+    3. Hotfix PRs (configurable labels/branch prefixes) merged after a deployment
+    """
+    result = await db.execute(
+        select(Deployment)
+        .where(Deployment.repo_id == repo.id, Deployment.deployed_at.isnot(None))
+        .order_by(Deployment.deployed_at.asc())
+    )
+    all_deps = list(result.scalars().all())
+    if not all_deps:
+        return
+
+    # Reset failure flags for re-detection
+    for dep in all_deps:
+        dep.is_failure = False
+        dep.failure_detected_via = None
+        dep.recovered_at = None
+        dep.recovery_deployment_id = None
+        dep.recovery_time_s = None
+
+    # Parse hotfix config
+    hotfix_labels = {
+        lbl.strip().lower()
+        for lbl in settings.hotfix_labels.split(",")
+        if lbl.strip()
+    }
+    hotfix_prefixes = [
+        p.strip() for p in settings.hotfix_branch_prefixes.split(",") if p.strip()
+    ]
+
+    # Signal 1: Failed workflow runs
+    for dep in all_deps:
+        if dep.status and dep.status != "success":
+            dep.is_failure = True
+            dep.failure_detected_via = "failed_deploy"
+
+    # Build index of successful deployments for recovery lookups
+    successful = [d for d in all_deps if d.status == "success"]
+
+    # Signal 2: Revert PRs merged within 48h after a successful deployment
+    for dep in successful:
+        window_end = dep.deployed_at + timedelta(hours=48)
+        revert_exists = await db.scalar(
+            select(PullRequest.id).where(
+                PullRequest.repo_id == repo.id,
+                PullRequest.is_revert.is_(True),
+                PullRequest.is_merged.is_(True),
+                PullRequest.merged_at.isnot(None),
+                PullRequest.merged_at > dep.deployed_at,
+                PullRequest.merged_at <= window_end,
+            ).limit(1)
+        )
+        if revert_exists is not None:
+            dep.is_failure = True
+            dep.failure_detected_via = "revert_pr"
+
+    # Signal 3: Hotfix PRs merged after a successful deployment
+    if hotfix_labels or hotfix_prefixes:
+        for dep in successful:
+            if dep.is_failure:
+                continue  # already flagged
+            window_end = dep.deployed_at + timedelta(hours=48)
+            pr_rows = (
+                await db.execute(
+                    select(PullRequest.labels, PullRequest.head_branch).where(
+                        PullRequest.repo_id == repo.id,
+                        PullRequest.is_merged.is_(True),
+                        PullRequest.merged_at.isnot(None),
+                        PullRequest.merged_at > dep.deployed_at,
+                        PullRequest.merged_at <= window_end,
+                        PullRequest.is_revert.isnot(True),
+                    )
+                )
+            ).all()
+            if not pr_rows:
+                continue
+            for labels, head_branch in pr_rows:
+                matched = False
+                if labels and hotfix_labels:
+                    pr_label_names = {
+                        (lbl.get("name", "") if isinstance(lbl, dict) else str(lbl)).lower()
+                        for lbl in labels
+                    }
+                    if pr_label_names & hotfix_labels:
+                        matched = True
+                if not matched and head_branch and hotfix_prefixes:
+                    for prefix in hotfix_prefixes:
+                        if head_branch.startswith(prefix):
+                            matched = True
+                            break
+                if matched:
+                    dep.is_failure = True
+                    dep.failure_detected_via = "hotfix_pr"
+                    break
+
+    # Link failures to recovery deployments (exclude flagged failures from candidates)
+    recovery_candidates = [
+        d for d in all_deps if d.status == "success" and not d.is_failure
+    ]
+    for dep in all_deps:
+        if not dep.is_failure:
+            continue
+        # Find the next non-failure successful deployment after this failure
+        recovery = None
+        for candidate in recovery_candidates:
+            if candidate.deployed_at and dep.deployed_at and candidate.deployed_at > dep.deployed_at:
+                recovery = candidate
+                break
+        if recovery:
+            dep.recovered_at = recovery.deployed_at
+            dep.recovery_deployment_id = recovery.id
+            dep.recovery_time_s = _safe_delta_seconds(recovery.deployed_at, dep.deployed_at)
+
+    await db.flush()
 
 
 # --- Sync Orchestration ---
@@ -1912,11 +2041,25 @@ async def run_sync(
         resumed_from_id: ID of the SyncEvent this resumes from
     """
     async with AsyncSessionLocal() as db:
-        # Concurrency guard
+        # Concurrency guard: advisory lock prevents TOCTOU race between
+        # the "is another sync running?" check and the INSERT.
+        # Lock key 73796e63 = crc32('devpulse_sync') — arbitrary constant.
+        SYNC_ADVISORY_LOCK_KEY = 1937337955  # noqa: N806
+        try:
+            await db.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
+        except Exception:
+            # SQLite (tests) doesn't support advisory locks — fall through to app-level check
+            pass
+
         active_result = await db.execute(
             select(SyncEvent).where(SyncEvent.status == "started").limit(1)
         )
         if active_result.scalar_one_or_none():
+            # Release advisory lock before raising
+            try:
+                await db.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
+            except Exception:
+                pass
             logger.warning("Skipping sync — another sync is already in progress")
             raise RuntimeError("A sync is already in progress")
 
@@ -1939,6 +2082,12 @@ async def run_sync(
         )
         db.add(sync_event)
         await db.commit()
+
+        # Release advisory lock — the committed SyncEvent row now guards concurrency
+        try:
+            await db.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
+        except Exception:
+            pass
 
         sync_log = logger.getChild(f"sync.{sync_event.id}")
         ctx = SyncContext(
@@ -2100,9 +2249,12 @@ async def run_sync(
                     )
 
                     _add_log(ctx, "info", "Recomputing collaboration scores")
+                    collab_since = sync_event.since_override or (
+                        datetime.now(timezone.utc) - timedelta(days=90)
+                    )
                     pair_count = await recompute_collaboration_scores(
                         db,
-                        sync_event.since_override,
+                        collab_since,
                         datetime.now(timezone.utc),
                     )
                     _add_log(
@@ -2129,6 +2281,13 @@ async def run_sync(
                     else:
                         sync_event.status = "failed"
                         sync_event.is_resumable = True
+
+                # Send Slack notification (non-blocking)
+                try:
+                    from app.services.slack import send_sync_notification
+                    await send_sync_notification(db, sync_event)
+                except Exception as e:
+                    ctx.sync_logger.warning("Slack sync notification failed: %s", e)
 
         except SyncCancelled:
             sync_log.info("Sync cancelled at top level")

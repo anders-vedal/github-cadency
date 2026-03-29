@@ -80,3 +80,26 @@ async def test_dora_empty(client: AsyncClient):
     assert data["deploy_frequency"] == 0.0
     assert data["avg_lead_time_hours"] is None
     assert data["deployments"] == []
+    # New CFR/MTTR fields should be present with defaults
+    assert data["change_failure_rate"] is None
+    assert data["cfr_band"] == "low"
+    assert data["avg_mttr_hours"] is None
+    assert data["mttr_band"] == "low"
+    assert data["failure_deployments"] == 0
+    assert data["overall_band"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_dora_cfr_fields_in_response(
+    client: AsyncClient, dora_data, sample_repo: Repository
+):
+    """API should include CFR/MTTR fields."""
+    resp = await client.get("/api/stats/dora")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "change_failure_rate" in data
+    assert "cfr_band" in data
+    assert "avg_mttr_hours" in data
+    assert "mttr_band" in data
+    assert "failure_deployments" in data
+    assert "overall_band" in data

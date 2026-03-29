@@ -10,3 +10,5 @@ apscheduler==3.11.0
 cryptography==44.0.3
 pyjwt==2.10.1
 python-multipart==0.0.20
+slack_sdk==3.34.0
+aiohttp==3.11.14

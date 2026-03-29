@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # DORA metrics
     deploy_workflow_name: str = ""
     deploy_environment: str = "production"
+    hotfix_labels: str = "hotfix,urgent,incident"
+    hotfix_branch_prefixes: str = "hotfix/"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

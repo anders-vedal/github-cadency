@@ -21,6 +21,8 @@ erDiagram
     developers ||--o{ developer_relationships : "target (managed by)"
     developers ||--o{ developer_collaboration_scores : "collaborator A"
     developers ||--o{ developer_collaboration_scores : "collaborator B"
+    developers ||--o| slack_user_settings : "has"
+    developers ||--o{ notification_log : "receives"
 
     repositories ||--o{ pull_requests : "contains"
     repositories ||--o{ issues : "contains"
@@ -342,19 +344,24 @@ Goal tracking with metric targets.
 
 ### `deployments`
 
-DORA deployment records from GitHub Actions.
+DORA deployment records from GitHub Actions, with failure tracking for CFR/MTTR.
 
 | Column | Type | Nullable | Key | Notes |
 |--------|------|----------|-----|-------|
 | `id` | Integer | NO | PK | |
 | `repo_id` | Integer | NO | FK -> repositories | INDEX, UNIQUE(repo_id, workflow_run_id) |
-| `environment` | String(100) | YES | | |
-| `sha` | String(40) | YES | | |
+| `environment` | String(100) | YES | | From `DEPLOY_ENVIRONMENT` config |
+| `sha` | String(40) | YES | | Deployed commit SHA |
 | `deployed_at` | DateTime(tz) | YES | | INDEX |
 | `workflow_name` | String(255) | YES | | |
 | `workflow_run_id` | BigInteger | NO | | |
-| `status` | String(30) | YES | | |
-| `lead_time_s` | Integer | YES | | |
+| `status` | String(30) | YES | | Workflow conclusion: `success`, `failure`, etc. |
+| `lead_time_s` | Integer | YES | | Computed post-sync for successful deploys |
+| `is_failure` | Boolean | NO | | Default `false`. Set by `detect_deployment_failures()` |
+| `failure_detected_via` | String(30) | YES | | `"failed_deploy"`, `"revert_pr"`, or `"hotfix_pr"` |
+| `recovered_at` | DateTime(tz) | YES | | Timestamp of recovery deployment |
+| `recovery_deployment_id` | Integer | YES | FK -> deployments | Self-referential: the deployment that fixed this failure |
+| `recovery_time_s` | Integer | YES | | Seconds from failure to recovery |
 
 ### `developer_relationships`
 
@@ -398,6 +405,61 @@ Materialized multi-signal collaboration scores per developer pair. Recomputed af
 
 **Signals:** PR reviews (cap 20), co-repo authoring (cap 5), issue co-comments (cap 10), @mentions (cap 10), co-assignment (cap 5). Each normalized to [0,1] via `min(count/cap, 1.0)`.
 
+### `slack_config`
+
+Singleton (id=1) global Slack integration configuration. Bot token, notification type toggles, thresholds, and schedule settings.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | Always 1 |
+| `slack_enabled` | Boolean | NO | false | Master toggle |
+| `bot_token` | Text | YES | | Slack Bot User OAuth Token (xoxb-...). Stored plaintext. |
+| `default_channel` | String(255) | YES | | Fallback channel for sync notifications |
+| `notify_stale_prs` | Boolean | NO | true | Global toggle |
+| `notify_high_risk_prs` | Boolean | NO | true | |
+| `notify_workload_alerts` | Boolean | NO | true | |
+| `notify_sync_failures` | Boolean | NO | true | |
+| `notify_sync_complete` | Boolean | NO | false | |
+| `notify_weekly_digest` | Boolean | NO | true | |
+| `stale_pr_days_threshold` | Integer | NO | 3 | Days before PR is stale |
+| `risk_score_threshold` | Float | NO | 0.7 | Risk score above which to alert |
+| `digest_day_of_week` | Integer | NO | 0 | 0=Mon..6=Sun |
+| `digest_hour_utc` | Integer | NO | 9 | |
+| `stale_check_hour_utc` | Integer | NO | 9 | |
+| `updated_at` | DateTime(tz) | NO | now() | |
+| `updated_by` | String(255) | YES | | |
+
+### `slack_user_settings`
+
+Per-developer Slack notification preferences and Slack user ID for DM delivery.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `developer_id` | Integer FK | NO | | UNIQUE. FK → developers |
+| `slack_user_id` | String(50) | YES | | Slack member ID (e.g., U0123456789) |
+| `notify_stale_prs` | Boolean | NO | true | |
+| `notify_high_risk_prs` | Boolean | NO | true | |
+| `notify_workload_alerts` | Boolean | NO | true | |
+| `notify_weekly_digest` | Boolean | NO | true | |
+| `created_at` | DateTime(tz) | NO | now() | |
+| `updated_at` | DateTime(tz) | NO | now() | |
+
+### `notification_log`
+
+Audit trail for all Slack notifications sent by DevPulse.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `notification_type` | String(50) | NO | | INDEX. stale_pr, high_risk_pr, workload, sync_complete, sync_failure, weekly_digest, test |
+| `channel` | String(255) | YES | | Channel ID or Slack user ID (for DMs) |
+| `recipient_developer_id` | Integer FK | YES | | FK → developers. NULL for channel messages. |
+| `status` | String(20) | NO | sent | INDEX. sent or failed |
+| `error_message` | Text | YES | | Slack API error if failed |
+| `payload` | JSONB | YES | | Message content for debugging |
+| `created_at` | DateTime(tz) | NO | now() | INDEX |
+
 ## Design Decisions
 
 ### Nullable Author/Reviewer/Assignee FKs
@@ -431,9 +493,9 @@ Stats are PR-level only to stay within GitHub API rate limits.
 
 ## Migration Patterns
 
-18 migrations from `001_add_app_role` through `018_add_relationships_and_collaboration`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
+22 migrations from `000_initial_schema` through `022_add_indexes_constraints_jsonb_fix`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
 
-**Note:** There is no initial migration creating the base tables. Migration 001 has `down_revision = None` but only adds `app_role` to an existing `developers` table. Base tables are created by `Base.metadata.create_all()` (called separately or via Docker setup).
+`000_initial_schema` is the root migration (`down_revision = None`). It creates the 10 base tables (`developers`, `repositories`, `pull_requests`, `pr_reviews`, `pr_review_comments`, `issues`, `issue_comments`, `sync_events`, `ai_analyses`, `developer_goals`) with their original columns. All subsequent migrations are additive from this base. `alembic upgrade head` is self-contained on a blank database.
 
 Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive DDL.
 
@@ -441,14 +503,14 @@ Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive 
 
 | Severity | Area | Description |
 |----------|------|-------------|
-| High | Migrations | No `000_initial_schema` migration -- `alembic upgrade head` on blank DB fails |
-| Medium | Indexes | Missing indexes on frequently-filtered columns: `pull_requests.state`, `pull_requests.merged_at`, `pull_requests.repo_id`, `issues.state`, `issues.assignee_id`, `pr_reviews.pr_id`, `pr_reviews.submitted_at`, `sync_events.status` |
+| ~~High~~ | ~~Migrations~~ | ~~No `000_initial_schema` migration~~ — **Resolved:** `000_initial_schema.py` now creates all base tables |
+| ~~Medium~~ | ~~Indexes~~ | ~~Missing indexes on frequently-filtered columns~~ — **Resolved:** Migration 022 adds indexes on `pull_requests.state/merged_at/repo_id`, `pr_reviews.pr_id/submitted_at`, `issues.state/assignee_id`, `sync_events.status` |
 | Medium | Types | `developers.skills` ORM annotation is `dict` but actual data is `list[str]` |
 | Medium | Types | `issues.labels` ORM annotation is `dict` but should be `list` (matches `pull_requests.labels`) |
 | Medium | Integrity | `ai_analyses.reused_from_id` is a plain Integer, not a FK -- no referential integrity |
 | Medium | Schema drift | `ai_usage_log.created_at` index exists in migration 013 but not in ORM model |
-| Medium | Schema drift | `sync_events.repo_ids` declared as `sa.JSON()` in migration 015 but `JSONB` in ORM model -- different storage on PostgreSQL |
-| Medium | Consistency | `pull_requests.github_id` and `issues.github_id` lack `unique=True` while `pr_reviews`, `pr_review_comments`, `issue_comments` have it -- inconsistent uniqueness enforcement on GitHub entity IDs |
+| ~~Medium~~ | ~~Schema drift~~ | ~~`sync_events.repo_ids` declared as `sa.JSON()` in migration 015 but `JSONB` in ORM model~~ — **Resolved:** Migration 022 converts to JSONB |
+| ~~Medium~~ | ~~Consistency~~ | ~~`pull_requests.github_id` and `issues.github_id` lack `unique=True`~~ — **Resolved:** Migration 022 adds unique constraints (`uq_pr_github_id`, `uq_issue_github_id`) |
 | Low | Defaults | Several non-nullable columns (`developers.is_active`, `developers.created_at`, `developer_goals.target_direction`, all `developer_collaboration_scores` float columns) use Python-only defaults with no `server_default` -- rows inserted outside SQLAlchemy get NULL |
 | Low | Timestamps | `datetime.utcnow` (deprecated in Python 3.12+) used as column default instead of `func.now()` |
 | Low | ORM | `developer_collaboration_scores` has FK columns but no `relationship()` declarations -- cannot use ORM joins |

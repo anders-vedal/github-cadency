@@ -599,7 +599,7 @@ devpulse/
 
 1. **Should external contributors (not in team registry) show up in stats?** Current design: their PRs/reviews are stored but not queryable by developer. Could add an "external" flag instead.
 
-2. **Do you want Slack/Teams notifications** when AI analysis detects something notable? Not in MVP but easy to add.
+2. ~~**Do you want Slack/Teams notifications** when AI analysis detects something notable?~~ **Implemented.** Slack integration added with 6 notification types (stale PRs, high-risk PRs, workload alerts, sync status, weekly digest). Bot token approach with per-user DM delivery. See `backend/app/services/slack.py` and `/admin/slack` settings page.
 
 3. **Multi-org support?** Current design assumes one org. If you need multiple orgs later, add an `org_id` column to repositories.
 

@@ -43,6 +43,7 @@ See [CLAUDE.md](../../CLAUDE.md) for the full tech stack reference. Key componen
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, shadcn/ui, TanStack Query v5 |
 | GitHub | REST API via httpx, GitHub App auth (JWT + installation tokens) |
 | AI | Anthropic Claude API (claude-sonnet-4-0), on-demand only |
+| Slack | slack_sdk AsyncWebClient, bot token stored in DB |
 | Scheduling | APScheduler AsyncIOScheduler (in-process, FastAPI lifespan) |
 
 ## Deployment Topology
@@ -53,9 +54,9 @@ Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxy
 
 | Component | Docs |
 |-----------|------|
-| 18 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
-| 8 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
-| 10 services: sync, stats, collaboration, enhanced collaboration, relationships, risk, goals, AI, work categorization, AI settings | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
+| 21 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
+| 9 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
+| 11 services: sync, stats, collaboration, enhanced collaboration, relationships, risk, goals, AI, work categorization, AI settings, Slack | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
 | React pages, hooks, state management, design system | [FRONTEND.md](FRONTEND.md) |
 | End-to-end flows: sync, webhooks, stats, AI, auth, goals | [DATA-FLOWS.md](DATA-FLOWS.md) |
 
@@ -95,11 +96,11 @@ See [DATA-FLOWS.md](DATA-FLOWS.md) for step-by-step traces with `file:function` 
 
 | Severity | Area | Description |
 |----------|------|-------------|
-| High | Migrations | No initial migration -- `alembic upgrade head` on a blank DB fails (see [DATA-MODEL.md](DATA-MODEL.md)) |
-| High | Auth | No JWT revocation -- deactivated users retain access for up to 7 days |
+| ~~High~~ | ~~Migrations~~ | ~~No initial migration~~ — **Fixed**: `000_initial_schema.py` added |
+| ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access for up to 7 days~~ — **Fixed**: `get_current_user()` checks `developers.is_active` on every request |
 | Medium | Sync | Auto-reactivation in sync can undo manual deactivation if the developer appears in GitHub activity or org members (warning log only) |
 | Medium | Sync | TOCTOU race on sync start -- three optimistic reads without DB-level locking |
 | Medium | Stats | N+1 query pattern in benchmarks -- ~9 queries per developer in Python loop |
 | Medium | Frontend | Single global ErrorBoundary -- any page crash takes down the entire UI |
-| Medium | API | Latent `NameError` in `sync.py` -- uses `httpx.HTTPStatusError` without importing `httpx` (see [API-DESIGN.md](API-DESIGN.md)) |
+| ~~Medium~~ | ~~API~~ | ~~Latent `NameError` in `sync.py` -- uses `httpx.HTTPStatusError` without importing `httpx`~~ — **Fixed**: `import httpx` added |
 | Low | Services | `_default_range()` duplicated in 5 service files |

@@ -104,10 +104,35 @@ Gartner considers DORA 4/4 table stakes for engineering intelligence platforms. 
 - Unit test the composite DORA rating logic
 - Test edge cases: no deployments, no failures, recovery without matching failure
 
+## Status
+
+**Completed** — 2026-03-29
+
 ## Acceptance Criteria
-- [ ] CFR computed from revert PRs + failed deploys + hotfix PRs
-- [ ] MTTR computed from failure→recovery deployment pairs
-- [ ] DORA bands for both new metrics match industry standard thresholds
-- [ ] Overall DORA performance level (Elite/High/Medium/Low) shown
-- [ ] Frontend shows all 4 DORA metrics with trends
-- [ ] Works without external incident tracker (pure GitHub signals)
+- [x] CFR computed from revert PRs + failed deploys + hotfix PRs
+- [x] MTTR computed from failure→recovery deployment pairs
+- [x] DORA bands for both new metrics match industry standard thresholds (DORA research: CFR elite <5%, high <15%, medium <45%, low >=45%)
+- [x] Overall DORA performance level (Elite/High/Medium/Low) shown — uses lowest-of-all-four logic
+- [x] Frontend shows all 4 DORA metrics with deployment timeline chart
+- [x] Works without external incident tracker (pure GitHub signals)
+
+## Deviations from Spec
+- CFR band thresholds use DORA research values (elite <5%, high <15%, medium <45%) instead of spec's tighter values (0-5%, 5-10%, 10-15%), per user decision
+- Hotfix detection is configurable via `HOTFIX_LABELS` and `HOTFIX_BRANCH_PREFIXES` env vars instead of hardcoded, per user decision
+- Deployment timeline uses a scatter chart (success/failure dots over time) instead of a bar-based visualization
+- "Frontend shows all 4 DORA metrics with trends" — shows 6 stat cards + 5 band indicators + deployment timeline. No time-series trend chart per metric (would require additional API endpoint for per-period breakdown).
+
+## Files Created
+- `backend/migrations/versions/020_add_deployment_failure_columns.py` — Alembic migration adding 5 columns to `deployments`
+- `frontend/src/components/charts/DeploymentTimeline.tsx` — Recharts scatter chart for deployment timeline
+
+## Files Modified
+- `backend/app/config.py` — Added `hotfix_labels`, `hotfix_branch_prefixes` settings
+- `backend/app/models/models.py` — Added `is_failure`, `failure_detected_via`, `recovered_at`, `recovery_deployment_id`, `recovery_time_s` to `Deployment`
+- `backend/app/schemas/schemas.py` — Extended `DeploymentDetail` and `DORAMetricsResponse`
+- `backend/app/services/github_sync.py` — Changed sync to fetch all completed runs; added `detect_deployment_failures()`
+- `backend/app/services/stats.py` — Added `_cfr_band()`, `_mttr_band()`, `_overall_dora_band()`; extended `get_dora_metrics()`
+- `backend/tests/unit/test_dora_metrics.py` — Added 23 new tests (47 total)
+- `backend/tests/integration/test_dora_api.py` — Added 2 new tests (5 total)
+- `frontend/src/utils/types.ts` — Extended TS interfaces
+- `frontend/src/pages/insights/DoraMetrics.tsx` — Full rewrite with 6 metric cards, 5 band indicators, timeline, enhanced table

@@ -17,6 +17,7 @@ from app.schemas.schemas import (
     TeamHealthRequest,
 )
 from app.services.ai_analysis import run_analysis, run_one_on_one_prep, run_team_health
+from app.services.exceptions import AIBudgetExceededError, AIFeatureDisabledError
 from app.services.ai_settings import (
     build_settings_response,
     get_ai_settings,
@@ -147,15 +148,20 @@ async def trigger_analysis(
     force: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await run_analysis(
-        db=db,
-        analysis_type=request.analysis_type.value,
-        scope_type=request.scope_type.value,
-        scope_id=request.scope_id,
-        date_from=request.date_from,
-        date_to=request.date_to,
-        force=force,
-    )
+    try:
+        result = await run_analysis(
+            db=db,
+            analysis_type=request.analysis_type.value,
+            scope_type=request.scope_type.value,
+            scope_id=request.scope_id,
+            date_from=request.date_from,
+            date_to=request.date_to,
+            force=force,
+        )
+    except AIFeatureDisabledError as e:
+        raise HTTPException(status_code=403, detail=e.detail)
+    except AIBudgetExceededError as e:
+        raise HTTPException(status_code=429, detail=e.detail)
     # Compute reused flag for response
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
@@ -210,13 +216,18 @@ async def one_on_one_prep(
     dev = await db.get(Developer, request.developer_id)
     if not dev:
         raise HTTPException(status_code=404, detail="Developer not found")
-    result = await run_one_on_one_prep(
-        db=db,
-        developer_id=request.developer_id,
-        date_from=request.date_from,
-        date_to=request.date_to,
-        force=force,
-    )
+    try:
+        result = await run_one_on_one_prep(
+            db=db,
+            developer_id=request.developer_id,
+            date_from=request.date_from,
+            date_to=request.date_to,
+            force=force,
+        )
+    except AIFeatureDisabledError as e:
+        raise HTTPException(status_code=403, detail=e.detail)
+    except AIBudgetExceededError as e:
+        raise HTTPException(status_code=429, detail=e.detail)
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
     return resp
@@ -232,13 +243,18 @@ async def team_health(
     force: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await run_team_health(
-        db=db,
-        team=request.team,
-        date_from=request.date_from,
-        date_to=request.date_to,
-        force=force,
-    )
+    try:
+        result = await run_team_health(
+            db=db,
+            team=request.team,
+            date_from=request.date_from,
+            date_to=request.date_to,
+            force=force,
+        )
+    except AIFeatureDisabledError as e:
+        raise HTTPException(status_code=403, detail=e.detail)
+    except AIBudgetExceededError as e:
+        raise HTTPException(status_code=429, detail=e.detail)
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
     return resp

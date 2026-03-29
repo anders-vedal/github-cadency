@@ -4,6 +4,7 @@ import type {
   BenchmarksResponse,
   CIStatsResponse,
   CodeChurnResponse,
+  CollaborationPairDetail,
   CollaborationResponse,
   CollaborationTrendsResponse,
   DORAMetricsResponse,
@@ -145,6 +146,24 @@ export function useCollaboration(team?: string, dateFrom?: string, dateTo?: stri
   })
 }
 
+export function useCollaborationPairDetail(
+  reviewerId: number | null,
+  authorId: number | null,
+  dateFrom?: string,
+  dateTo?: string,
+) {
+  const params = new URLSearchParams()
+  if (reviewerId != null) params.set('reviewer_id', String(reviewerId))
+  if (authorId != null) params.set('author_id', String(authorId))
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  return useQuery<CollaborationPairDetail>({
+    queryKey: ['collaboration-pair', reviewerId, authorId, dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/collaboration/pair?${params}`),
+    enabled: reviewerId != null && authorId != null,
+  })
+}
+
 export function useCollaborationTrends(team?: string, dateFrom?: string, dateTo?: string) {
   const params = new URLSearchParams()
   if (team) params.set('team', team)
@@ -214,7 +233,9 @@ export function useCIStats(
   dateTo?: string,
   repoId?: number | null,
 ) {
-  const params = dateParams(dateFrom, dateTo)
+  const params = new URLSearchParams()
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
   if (repoId) params.set('repo_id', String(repoId))
   return useQuery<CIStatsResponse>({
     queryKey: ['ci-stats', dateFrom, dateTo, repoId],

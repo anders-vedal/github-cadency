@@ -38,16 +38,7 @@ import { HelpCircle, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAISettings } from '@/hooks/useAISettings'
 import type { WorkCategory } from '@/utils/types'
-
-const CATEGORY_CONFIG: Record<WorkCategory, { label: string; color: string }> = {
-  feature: { label: 'Feature', color: '#3b82f6' },
-  bugfix: { label: 'Bug Fix', color: '#ef4444' },
-  tech_debt: { label: 'Tech Debt', color: '#f59e0b' },
-  ops: { label: 'Ops', color: '#22c55e' },
-  unknown: { label: 'Unknown', color: '#94a3b8' },
-}
-
-const CATEGORY_ORDER: WorkCategory[] = ['feature', 'bugfix', 'tech_debt', 'ops', 'unknown']
+import { CATEGORY_CONFIG, CATEGORY_ORDER } from '@/utils/categoryConfig'
 
 const tooltipStyle = {
   backgroundColor: 'hsl(var(--card))',

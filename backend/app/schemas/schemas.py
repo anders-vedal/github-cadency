@@ -432,6 +432,56 @@ class CollaborationTrendsResponse(BaseModel):
     periods: list[CollaborationTrendPeriod]
 
 
+class PairRelationship(BaseModel):
+    label: str  # mentor, peer, one_way_dependency, rubber_stamp, gatekeeper, casual, none
+    confidence: float  # 0-1
+    explanation: str
+
+
+class PairReviewedPR(BaseModel):
+    pr_id: int
+    pr_number: int
+    title: str
+    html_url: str | None
+    repo_full_name: str
+    review_state: str | None
+    quality_tier: str
+    comment_count: int
+    additions: int | None
+    deletions: int | None
+    submitted_at: datetime | None
+
+
+class CommentTypeBreakdown(BaseModel):
+    comment_type: str
+    count: int
+
+
+class QualityTierBreakdown(BaseModel):
+    tier: str
+    count: int
+
+
+class CollaborationPairDetail(BaseModel):
+    reviewer_id: int
+    reviewer_name: str
+    reviewer_avatar_url: str | None
+    reviewer_team: str | None
+    author_id: int
+    author_name: str
+    author_avatar_url: str | None
+    author_team: str | None
+    total_reviews: int
+    approval_rate: float
+    changes_requested_rate: float
+    avg_quality_tier: str
+    quality_tier_breakdown: list[QualityTierBreakdown]
+    comment_type_breakdown: list[CommentTypeBreakdown]
+    total_comments: int
+    relationship: PairRelationship
+    recent_prs: list[PairReviewedPR]
+
+
 # --- Goals schemas (M6) ---
 
 
@@ -706,6 +756,9 @@ class DeploymentDetail(BaseModel):
     workflow_name: str | None = None
     status: str | None = None
     lead_time_hours: float | None = None
+    is_failure: bool = False
+    failure_detected_via: str | None = None
+    recovery_time_hours: float | None = None
 
 
 class DORAMetricsResponse(BaseModel):
@@ -716,6 +769,13 @@ class DORAMetricsResponse(BaseModel):
     total_deployments: int = 0
     period_days: int = 0
     deployments: list[DeploymentDetail] = []
+    total_all_deployments: int = 0
+    change_failure_rate: float | None = None
+    cfr_band: str = "low"
+    avg_mttr_hours: float | None = None
+    mttr_band: str = "low"
+    failure_deployments: int = 0
+    overall_band: str = "low"
 
 
 # --- Work Categorization schemas (P4-02) ---
@@ -959,3 +1019,95 @@ class CommunicationScoreEntry(BaseModel):
 
 class CommunicationScoresResponse(BaseModel):
     developers: list[CommunicationScoreEntry]
+
+
+# --- Slack Integration schemas ---
+
+
+class SlackNotificationType(str, Enum):
+    stale_pr = "stale_pr"
+    high_risk_pr = "high_risk_pr"
+    workload = "workload"
+    sync_complete = "sync_complete"
+    sync_failure = "sync_failure"
+    weekly_digest = "weekly_digest"
+
+
+class SlackConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    slack_enabled: bool
+    bot_token_configured: bool = False
+    default_channel: str | None
+    notify_stale_prs: bool
+    notify_high_risk_prs: bool
+    notify_workload_alerts: bool
+    notify_sync_failures: bool
+    notify_sync_complete: bool
+    notify_weekly_digest: bool
+    stale_pr_days_threshold: int
+    risk_score_threshold: float
+    digest_day_of_week: int
+    digest_hour_utc: int
+    stale_check_hour_utc: int
+    updated_at: datetime
+    updated_by: str | None
+
+
+class SlackConfigUpdate(BaseModel):
+    slack_enabled: bool | None = None
+    bot_token: str | None = None
+    default_channel: str | None = None
+    notify_stale_prs: bool | None = None
+    notify_high_risk_prs: bool | None = None
+    notify_workload_alerts: bool | None = None
+    notify_sync_failures: bool | None = None
+    notify_sync_complete: bool | None = None
+    notify_weekly_digest: bool | None = None
+    stale_pr_days_threshold: int | None = None
+    risk_score_threshold: float | None = None
+    digest_day_of_week: int | None = None
+    digest_hour_utc: int | None = None
+    stale_check_hour_utc: int | None = None
+
+
+class SlackUserSettingsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    developer_id: int
+    slack_user_id: str | None
+    notify_stale_prs: bool
+    notify_high_risk_prs: bool
+    notify_workload_alerts: bool
+    notify_weekly_digest: bool
+
+
+class SlackUserSettingsUpdate(BaseModel):
+    slack_user_id: str | None = None
+    notify_stale_prs: bool | None = None
+    notify_high_risk_prs: bool | None = None
+    notify_workload_alerts: bool | None = None
+    notify_weekly_digest: bool | None = None
+
+
+class NotificationLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    notification_type: str
+    channel: str | None
+    recipient_developer_id: int | None
+    status: str
+    error_message: str | None
+    payload: dict | None
+    created_at: datetime
+
+
+class NotificationHistoryResponse(BaseModel):
+    notifications: list[NotificationLogResponse]
+    total: int
+
+
+class SlackTestResponse(BaseModel):
+    success: bool
+    message: str

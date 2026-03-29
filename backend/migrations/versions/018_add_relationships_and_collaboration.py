@@ -1,7 +1,7 @@
 """Add developer relationships, collaboration scores, office, and mentions columns.
 
 Revision ID: 018
-Revises: 5449ba551698
+Revises: 017_add_sync_granular_progress
 Create Date: 2026-03-29
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "018"
-down_revision = "5449ba551698"
+down_revision = "017_add_sync_granular_progress"
 branch_labels = None
 depends_on = None
 

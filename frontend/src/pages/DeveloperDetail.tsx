@@ -13,6 +13,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import { HelpCircle } from 'lucide-react'
 import RelationshipsCard from '@/components/RelationshipsCard'
 import WorksWithSection from '@/components/WorksWithSection'
+import SlackPreferencesSection from '@/components/SlackPreferencesSection'
 import ErrorCard from '@/components/ErrorCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -27,6 +28,7 @@ import {
   DialogTrigger,
   DialogClose,
 } from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import StatCard from '@/components/StatCard'
 import TrendChart from '@/components/charts/TrendChart'
 import PercentileBar from '@/components/charts/PercentileBar'
@@ -357,6 +359,9 @@ export default function DeveloperDetail() {
       {/* Works With */}
       <WorksWithSection developerId={devId} />
 
+      {/* Slack Notification Preferences — visible to own profile or admin */}
+      {(isOwnPage || isAdmin) && <SlackPreferencesSection isOwnPage={isOwnPage} />}
+
       {/* Goals */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
@@ -475,14 +480,15 @@ export default function DeveloperDetail() {
                 <div className="space-y-4">
                   <div className="space-y-1.5">
                     <label className="text-sm font-medium">Analysis Type</label>
-                    <select
-                      className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
-                      value={analysisType}
-                      onChange={(e) => setAnalysisType(e.target.value as 'communication' | 'sentiment')}
-                    >
-                      <option value="communication">Communication</option>
-                      <option value="sentiment">Sentiment</option>
-                    </select>
+                    <Select value={analysisType} onValueChange={(v) => setAnalysisType(v as 'communication' | 'sentiment')}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="communication">Communication</SelectItem>
+                        <SelectItem value="sentiment">Sentiment</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <p className="text-sm text-muted-foreground">
                     Date range: {dateFrom} to {dateTo}

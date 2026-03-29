@@ -4,12 +4,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings as app_settings
 from app.models.models import AIAnalysis, AISettings, AIUsageLog
+from app.services.exceptions import AIFeatureDisabledError
 from app.schemas.schemas import (
     AICostEstimate,
     AIFeatureStatus,
@@ -148,17 +148,15 @@ async def check_feature_enabled(db: AsyncSession, feature_name: str) -> AISettin
     ai_settings = await get_ai_settings(db)
 
     if not ai_settings.ai_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="All AI features are disabled. An admin can re-enable them in AI Settings.",
+        raise AIFeatureDisabledError(
+            "All AI features are disabled. An admin can re-enable them in AI Settings.",
         )
 
     feature_attr = f"feature_{feature_name}"
     if not getattr(ai_settings, feature_attr, True):
         label = FEATURE_META.get(feature_name, {}).get("label", feature_name)
-        raise HTTPException(
-            status_code=403,
-            detail=f"AI feature '{label}' is disabled. An admin can re-enable it in AI Settings.",
+        raise AIFeatureDisabledError(
+            f"AI feature '{label}' is disabled. An admin can re-enable it in AI Settings.",
         )
 
     return ai_settings

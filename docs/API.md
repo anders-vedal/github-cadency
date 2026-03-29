@@ -9,6 +9,8 @@ DevPulse uses GitHub OAuth for authentication. After login, all protected endpoi
 Authorization: Bearer {jwt_token}
 ```
 
+Every authenticated request checks `developers.is_active` in the database. Deactivated or deleted accounts receive `401 Unauthorized` immediately, even if the JWT is otherwise valid.
+
 **Two roles:**
 - `admin` — full access to all endpoints
 - `developer` — read-only access to own stats, profile, goals, and repo stats
@@ -22,7 +24,7 @@ Authorization: Bearer {jwt_token}
 | **Auth** (`/api/auth/*`) | Public | Public |
 | **Developer stats** (`/api/stats/developer/{id}`) | Any ID | Own ID only |
 | **Developer trends** (`/api/stats/developer/{id}/trends`) | Any ID | Own ID only |
-| **Team/benchmarks/workload/collaboration/collaboration-trends/stale-prs/issue-linkage/issue-quality/issue-creators** | Yes | No (403) |
+| **Team/benchmarks/workload/collaboration/collaboration-trends/collaboration-pair/stale-prs/issue-linkage/issue-quality/issue-creators** | Yes | No (403) |
 | **Code churn** (`/api/stats/repo/{id}/churn`) | Yes | No (403) |
 | **PR risk** (`/api/stats/pr/{id}/risk`, `/api/stats/risk-summary`) | Yes | No (403) |
 | **CI/CD stats** (`/api/stats/ci`) | Yes | No (403) |
@@ -36,6 +38,8 @@ Authorization: Bearer {jwt_token}
 | **Goal progress** (`/api/goals/{id}/progress`) | Any goal | Own goals only |
 | **Sync** (`/api/sync/*`) | Yes | No (403) |
 | **AI Analysis** (`/api/ai/*`) | Yes | No (403) |
+| **Slack config/test/history** (`/api/slack/config`, `/test`, `/notifications`) | Yes | No (403) |
+| **Slack user settings** (`/api/slack/user-settings`) | Own + any (admin) | Own only |
 
 Date parameters accept ISO 8601 format: `2026-01-01T00:00:00Z`. When `date_from`/`date_to` are omitted, defaults to the last 30 days.
 
@@ -529,6 +533,78 @@ Implementation details:
 - **Silo:** Team pairs with zero cross-team reviews in the bucket. Returns 0 (not the total possible pairs) when a bucket has no review activity to avoid misleading spikes
 - **Isolated:** Developers who gave 0 reviews AND received reviews from <= 1 unique reviewer. Returns 0 when a bucket has no review activity
 
+### GET /api/stats/collaboration/pair
+
+Detailed review interaction between a specific reviewer→author pair, including relationship classification. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `reviewer_id` | int | **required** | Reviewer developer ID |
+| `author_id` | int | **required** | PR author developer ID |
+| `date_from` | datetime | 30 days ago | Start of date range |
+| `date_to` | datetime | now | End of date range |
+
+**Response:** `200 OK`
+```json
+{
+  "reviewer_id": 1,
+  "reviewer_name": "Alice",
+  "reviewer_avatar_url": "https://avatars.githubusercontent.com/u/123",
+  "reviewer_team": "Platform",
+  "author_id": 2,
+  "author_name": "Bob",
+  "author_avatar_url": "https://avatars.githubusercontent.com/u/456",
+  "author_team": "Backend",
+  "total_reviews": 15,
+  "approval_rate": 0.667,
+  "changes_requested_rate": 0.2,
+  "avg_quality_tier": "standard",
+  "quality_tier_breakdown": [
+    { "tier": "standard", "count": 8 },
+    { "tier": "thorough", "count": 5 },
+    { "tier": "minimal", "count": 2 }
+  ],
+  "comment_type_breakdown": [
+    { "comment_type": "architectural", "count": 6 },
+    { "comment_type": "suggestion", "count": 4 },
+    { "comment_type": "blocker", "count": 3 },
+    { "comment_type": "nit", "count": 2 }
+  ],
+  "total_comments": 15,
+  "relationship": {
+    "label": "mentor",
+    "confidence": 0.85,
+    "explanation": "Heavily one-directional reviews with substantive architectural/blocker feedback and high review quality — consistent with a mentoring relationship."
+  },
+  "recent_prs": [
+    {
+      "pr_id": 42,
+      "pr_number": 301,
+      "title": "Refactor auth middleware",
+      "html_url": "https://github.com/org/repo/pull/301",
+      "repo_full_name": "org/repo",
+      "review_state": "APPROVED",
+      "quality_tier": "thorough",
+      "comment_count": 3,
+      "additions": 120,
+      "deletions": 45,
+      "submitted_at": "2025-03-15T14:30:00Z"
+    }
+  ]
+}
+```
+
+**Relationship labels:** `mentor` (asymmetric + substantive comments + high quality), `peer` (balanced bidirectional), `gatekeeper` (asymmetric + high changes_requested), `rubber_stamp` (high approval + low quality + few comments), `one_way_dependency` (asymmetric, no mentor/gatekeeper signals), `casual` (< 3 reviews), `none` (0 reviews).
+
+**Error responses:**
+- `404` — reviewer or author developer ID not found
+- `403` — non-admin user
+
+Implementation details:
+- 3 SQL queries: reviews+PRs joined, comment type aggregation by reviewer username, reverse review count for relationship asymmetry detection
+- Recent PRs deduplicated by PR ID (takes most recent review per PR), capped at 30
+- `classify_pair_relationship()` is a pure function with clear input/output contract designed for future AI classifier swap
+
 ### GET /api/stats/workload
 
 Per-developer workload indicators and automated alerts. **Admin only.**
@@ -1010,7 +1086,7 @@ CI/CD check-run analysis across all repos or scoped to a single repo. **Admin on
 
 ### GET /api/stats/dora
 
-DORA metrics: deployment frequency and change lead time from GitHub Actions workflow runs. Only returns data when `DEPLOY_WORKFLOW_NAME` is configured. **Admin only.**
+All four DORA metrics: deployment frequency, change lead time, change failure rate (CFR), and mean time to recovery (MTTR) from GitHub Actions workflow runs. Only returns data when `DEPLOY_WORKFLOW_NAME` is configured. **Admin only.**
 
 **Query Parameters:**
 
@@ -1029,7 +1105,14 @@ DORA metrics: deployment frequency and change lead time from GitHub Actions work
   "avg_lead_time_hours": 18.5,
   "lead_time_band": "high",
   "total_deployments": 13,
+  "total_all_deployments": 15,
   "period_days": 30,
+  "change_failure_rate": 13.33,
+  "cfr_band": "high",
+  "avg_mttr_hours": 4.5,
+  "mttr_band": "high",
+  "failure_deployments": 2,
+  "overall_band": "medium",
   "deployments": [
     {
       "id": 42,
@@ -1039,7 +1122,23 @@ DORA metrics: deployment frequency and change lead time from GitHub Actions work
       "deployed_at": "2026-03-27T14:30:00Z",
       "workflow_name": "deploy-production",
       "status": "success",
-      "lead_time_hours": 4.25
+      "lead_time_hours": 4.25,
+      "is_failure": false,
+      "failure_detected_via": null,
+      "recovery_time_hours": null
+    },
+    {
+      "id": 41,
+      "repo_name": "org/api-service",
+      "environment": "production",
+      "sha": "def456789abc123...",
+      "deployed_at": "2026-03-26T10:00:00Z",
+      "workflow_name": "deploy-production",
+      "status": "success",
+      "lead_time_hours": 2.0,
+      "is_failure": true,
+      "failure_detected_via": "revert_pr",
+      "recovery_time_hours": 4.5
     }
   ]
 }
@@ -1048,12 +1147,19 @@ DORA metrics: deployment frequency and change lead time from GitHub Actions work
 | Field | Description |
 |-------|-------------|
 | `deploy_frequency` | Successful deployments per day in the period (`total_deployments / period_days`) |
-| `deploy_frequency_band` | DORA benchmark classification: `elite` (>1/day), `high` (daily–weekly), `medium` (weekly–monthly), `low` (<monthly) |
+| `deploy_frequency_band` | DORA benchmark: `elite` (>1/day), `high` (daily–weekly), `medium` (weekly–monthly), `low` (<monthly) |
 | `avg_lead_time_hours` | Average hours from oldest undeployed merged PR to deployment. `null` if no lead time data |
-| `lead_time_band` | DORA benchmark classification: `elite` (<1h), `high` (<1 day), `medium` (<1 week), `low` (>1 week) |
+| `lead_time_band` | DORA benchmark: `elite` (<1h), `high` (<1 day), `medium` (<1 week), `low` (>1 week) |
 | `total_deployments` | Count of successful deployments in the period |
+| `total_all_deployments` | Count of all deployments (success + failure) — CFR denominator |
 | `period_days` | Number of days in the queried date range |
-| `deployments` | Last 20 successful deployments in the period, ordered by `deployed_at` descending |
+| `change_failure_rate` | Percentage of deployments that caused a failure. `null` if no deployments |
+| `cfr_band` | DORA research benchmark: `elite` (<5%), `high` (<15%), `medium` (<45%), `low` (>=45%) |
+| `avg_mttr_hours` | Mean time to recovery in hours. `null` if no failures with recovery data |
+| `mttr_band` | DORA benchmark: `elite` (<1h), `high` (<24h), `medium` (<168h), `low` (>=168h) |
+| `failure_deployments` | Count of deployments flagged as failures in the period |
+| `overall_band` | Overall DORA performance level — lowest (worst) of all 4 metric bands |
+| `deployments` | Last 20 deployments (all statuses) in the period, ordered by `deployed_at` descending |
 
 **Deployment detail fields:**
 
@@ -1065,10 +1171,18 @@ DORA metrics: deployment frequency and change lead time from GitHub Actions work
 | `sha` | Deployed commit SHA |
 | `deployed_at` | Deployment completion timestamp (ISO 8601) |
 | `workflow_name` | GitHub Actions workflow name |
-| `status` | Deployment status (`"success"`) |
+| `status` | Workflow run conclusion (`"success"`, `"failure"`, etc.) |
 | `lead_time_hours` | Hours from oldest undeployed merged PR to this deployment. `null` for the first deployment (no prior reference) |
+| `is_failure` | Whether this deployment was flagged as a failure |
+| `failure_detected_via` | How the failure was detected: `"failed_deploy"`, `"revert_pr"`, or `"hotfix_pr"`. `null` if not a failure |
+| `recovery_time_hours` | Hours from this failure to the next successful non-failure deployment. `null` if not a failure or no recovery yet |
 
-**Configuration:** Deployment sync requires the `DEPLOY_WORKFLOW_NAME` environment variable to be set to the exact name of the GitHub Actions workflow that represents a production deployment. If empty, no deployments are synced and this endpoint returns zero values.
+**Failure detection signals:**
+1. **Failed workflow runs** — `conclusion != "success"` on the GitHub Actions run
+2. **Revert PRs** — a PR with `is_revert=true` merged within 48h after the deployment
+3. **Hotfix PRs** — a PR matching configured labels (`HOTFIX_LABELS`) or branch prefixes (`HOTFIX_BRANCH_PREFIXES`) merged within 48h
+
+**Configuration:** Deployment sync requires `DEPLOY_WORKFLOW_NAME` to be set to the exact name of the GitHub Actions workflow that represents a production deployment. If empty, no deployments are synced and this endpoint returns zero values. Failure detection is configurable via `HOTFIX_LABELS` (comma-separated, default `hotfix,urgent,incident`) and `HOTFIX_BRANCH_PREFIXES` (comma-separated, default `hotfix/`).
 
 ---
 
@@ -1989,3 +2103,144 @@ Four components (25 points each):
 - `comment_depth` — average comment length (200 chars = full marks)
 - `reach` — unique developers interacted with / team size
 - `responsiveness` — average time to first review (< 24h = full marks)
+
+---
+
+## Slack Integration
+
+Slack notifications via bot token. Admin configures global settings; each developer sets their Slack user ID and notification preferences.
+
+### GET /api/slack/config
+
+Get global Slack configuration. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "slack_enabled": false,
+  "bot_token_configured": false,
+  "default_channel": null,
+  "notify_stale_prs": true,
+  "notify_high_risk_prs": true,
+  "notify_workload_alerts": true,
+  "notify_sync_failures": true,
+  "notify_sync_complete": false,
+  "notify_weekly_digest": true,
+  "stale_pr_days_threshold": 3,
+  "risk_score_threshold": 0.7,
+  "digest_day_of_week": 0,
+  "digest_hour_utc": 9,
+  "stale_check_hour_utc": 9,
+  "updated_at": "2026-03-29T10:00:00Z",
+  "updated_by": null
+}
+```
+
+Note: `bot_token` is never returned. `bot_token_configured` indicates whether a token has been set.
+
+### PATCH /api/slack/config
+
+Update global Slack configuration. **Admin only.** All fields optional; only provided fields are updated.
+
+**Request body:** Any subset of:
+```json
+{
+  "slack_enabled": true,
+  "bot_token": "xoxb-...",
+  "default_channel": "#engineering",
+  "notify_stale_prs": true,
+  "notify_high_risk_prs": true,
+  "notify_workload_alerts": true,
+  "notify_sync_failures": true,
+  "notify_sync_complete": false,
+  "notify_weekly_digest": true,
+  "stale_pr_days_threshold": 3,
+  "risk_score_threshold": 0.7,
+  "digest_day_of_week": 0,
+  "digest_hour_utc": 9,
+  "stale_check_hour_utc": 9
+}
+```
+
+**Response:** `200 OK` — same shape as GET response.
+
+### POST /api/slack/test
+
+Send a test message to the default channel. **Admin only.** Requires Slack to be enabled with a bot token configured.
+
+**Response:** `200 OK`
+```json
+{
+  "success": true,
+  "message": "Test message sent to #engineering"
+}
+```
+
+**Errors:** `403` if Slack disabled, `503` if no bot token configured.
+
+### GET /api/slack/notifications
+
+Get notification history log. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `limit` | int | 50 | Max results (1-200) |
+| `offset` | int | 0 | Pagination offset |
+
+**Response:** `200 OK`
+```json
+{
+  "notifications": [
+    {
+      "id": 1,
+      "notification_type": "sync_complete",
+      "channel": "#engineering",
+      "recipient_developer_id": null,
+      "status": "sent",
+      "error_message": null,
+      "payload": {"text": "Sync completed..."},
+      "created_at": "2026-03-29T10:00:00Z"
+    }
+  ],
+  "total": 42
+}
+```
+
+`notification_type` values: `stale_pr`, `high_risk_pr`, `workload`, `sync_complete`, `sync_failure`, `weekly_digest`, `test`.
+
+### GET /api/slack/user-settings
+
+Get the current authenticated user's Slack notification preferences. **Any authenticated user.**
+
+**Response:** `200 OK`
+```json
+{
+  "developer_id": 2,
+  "slack_user_id": "U0123456789",
+  "notify_stale_prs": true,
+  "notify_high_risk_prs": true,
+  "notify_workload_alerts": true,
+  "notify_weekly_digest": true
+}
+```
+
+### PATCH /api/slack/user-settings
+
+Update the current user's Slack notification preferences. **Any authenticated user.** All fields optional.
+
+**Request body:**
+```json
+{
+  "slack_user_id": "U0123456789",
+  "notify_stale_prs": false,
+  "notify_weekly_digest": true
+}
+```
+
+**Response:** `200 OK` — same shape as GET response.
+
+### GET /api/slack/user-settings/{developer_id}
+
+Get any developer's Slack notification preferences. **Admin only.**
+
+**Response:** `200 OK` — same shape as user-settings GET.

@@ -10,6 +10,7 @@ import ErrorCard from '@/components/ErrorCard'
 import StalePRsSection from '@/components/StalePRsSection'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import {
   Table,
@@ -19,41 +20,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import type { WorkloadAlert, DeveloperWorkload } from '@/utils/types'
+import type { DeveloperWorkload } from '@/utils/types'
 
-// --- Alert severity mapping ---
-
-type Severity = 'critical' | 'warning' | 'info'
-
-const alertSeverityMap: Record<WorkloadAlert['type'], Severity> = {
-  stale_prs: 'critical',
-  review_bottleneck: 'warning',
-  uneven_assignment: 'warning',
-  underutilized: 'info',
-  merged_without_approval: 'warning',
-  revert_spike: 'critical',
-}
-
-const severityStyles: Record<Severity, string> = {
-  critical: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400',
-  warning: 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400',
-  info: 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400',
-}
-
-const severityLabels: Record<Severity, string> = {
-  critical: 'Critical',
-  warning: 'Warning',
-  info: 'Info',
-}
-
-// --- Workload score styles ---
-
-const workloadStyles: Record<DeveloperWorkload['workload_score'], string> = {
-  low: 'bg-blue-500/10 text-blue-600',
-  balanced: 'bg-emerald-500/10 text-emerald-600',
-  high: 'bg-amber-500/10 text-amber-600',
-  overloaded: 'bg-red-500/10 text-red-600',
-}
+import AlertStrip, { workloadStyles } from '@/components/AlertStrip'
+import SortableHead from '@/components/SortableHead'
 
 const workloadBarColors: Record<DeveloperWorkload['workload_score'], string> = {
   low: 'bg-blue-500',
@@ -147,16 +117,17 @@ export default function WorkloadOverview() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Workload Overview</h1>
         {teams.length > 0 && (
-          <select
-            value={teamFilter}
-            onChange={(e) => setTeamFilter(e.target.value)}
-            className="rounded-md border bg-background px-2 py-1 text-sm"
-          >
-            <option value="">All teams</option>
-            {teams.map((t) => (
-              <option key={t} value={t}>{t}</option>
-            ))}
-          </select>
+          <Select value={teamFilter || '__all__'} onValueChange={(v) => setTeamFilter(v === '__all__' ? '' : v)}>
+            <SelectTrigger className="w-[160px]">
+              <SelectValue placeholder="All teams" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All teams</SelectItem>
+              {teams.map((t) => (
+                <SelectItem key={t} value={t}>{t}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         )}
       </div>
 
@@ -248,77 +219,3 @@ export default function WorkloadOverview() {
   )
 }
 
-// --- Sub-components ---
-
-function AlertStrip({ alerts }: { alerts: WorkloadAlert[] }) {
-  if (alerts.length === 0) {
-    return (
-      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-700 dark:text-emerald-400">
-        All clear — no workload issues detected.
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-2">
-      {alerts.map((alert, i) => {
-        const severity = alertSeverityMap[alert.type]
-        return (
-          <div
-            key={`${alert.type}-${alert.developer_id}-${i}`}
-            className={cn(
-              'flex items-center gap-3 rounded-lg border px-4 py-3 text-sm',
-              severityStyles[severity]
-            )}
-          >
-            <Badge
-              variant="outline"
-              className={cn('shrink-0 text-[10px] uppercase', severityStyles[severity])}
-            >
-              {severityLabels[severity]}
-            </Badge>
-            <span className="flex-1">{alert.message}</span>
-            {alert.developer_id && (
-              <Link
-                to={`/team/${alert.developer_id}`}
-                className="shrink-0 text-xs font-medium underline underline-offset-2"
-              >
-                View
-              </Link>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function SortableHead({
-  field,
-  current,
-  asc,
-  onToggle,
-  children,
-}: {
-  field: SortField
-  current: SortField
-  asc: boolean
-  onToggle: (f: SortField) => void
-  children: React.ReactNode
-}) {
-  const active = field === current
-  return (
-    <TableHead>
-      <button
-        type="button"
-        className="inline-flex items-center gap-1 hover:text-foreground"
-        onClick={() => onToggle(field)}
-      >
-        {children}
-        {active && (
-          <span className="text-xs">{asc ? '\u2191' : '\u2193'}</span>
-        )}
-      </button>
-    </TableHead>
-  )
-}

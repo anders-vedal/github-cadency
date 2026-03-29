@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
-from app.api import ai_analysis, developers, goals, oauth, relationships, stats, sync, webhooks
+from app.api import ai_analysis, developers, goals, oauth, relationships, slack, stats, sync, webhooks
 from app.config import settings
 from app.models.database import AsyncSessionLocal
 from app.models.models import Repository, SyncEvent
@@ -138,6 +138,24 @@ async def lifespan(app: FastAPI):
         id="full_sync",
         misfire_grace_time=None,  # Run even after restart
     )
+    # Slack notification scheduled jobs — run hourly, check configured schedule at runtime
+    from app.services.slack import scheduled_stale_pr_check, scheduled_weekly_digest
+
+    scheduler.add_job(
+        scheduled_stale_pr_check,
+        "cron",
+        minute=5,
+        id="slack_stale_pr_check",
+        misfire_grace_time=None,
+    )
+    scheduler.add_job(
+        scheduled_weekly_digest,
+        "cron",
+        minute=10,
+        id="slack_weekly_digest",
+        misfire_grace_time=None,
+    )
+
     scheduler.start()
     logger.info(
         "Scheduler started: incremental every %dm, full at %d:00",
@@ -174,6 +192,7 @@ app.include_router(webhooks.router, prefix="/api", tags=["webhooks"])
 app.include_router(goals.router, prefix="/api", tags=["goals"])
 app.include_router(ai_analysis.router, prefix="/api", tags=["ai"])
 app.include_router(relationships.router, prefix="/api", tags=["relationships"])
+app.include_router(slack.router, prefix="/api", tags=["slack"])
 
 
 @app.get("/api/health")

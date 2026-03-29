@@ -76,27 +76,25 @@ class TestUpdateSettings:
 
 class TestCheckFeatureEnabled:
     @pytest.mark.asyncio
-    async def test_master_off_raises_403(self, db_session, ai_settings):
-        from fastapi import HTTPException
+    async def test_master_off_raises_disabled(self, db_session, ai_settings):
+        from app.services.exceptions import AIFeatureDisabledError
 
         ai_settings.ai_enabled = False
         await db_session.commit()
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AIFeatureDisabledError) as exc_info:
             await check_feature_enabled(db_session, "general_analysis")
-        assert exc_info.value.status_code == 403
         assert "disabled" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
-    async def test_feature_off_raises_403(self, db_session, ai_settings):
-        from fastapi import HTTPException
+    async def test_feature_off_raises_disabled(self, db_session, ai_settings):
+        from app.services.exceptions import AIFeatureDisabledError
 
         ai_settings.feature_one_on_one_prep = False
         await db_session.commit()
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AIFeatureDisabledError) as exc_info:
             await check_feature_enabled(db_session, "one_on_one_prep")
-        assert exc_info.value.status_code == 403
         assert "1:1 Prep Brief" in exc_info.value.detail
 
     @pytest.mark.asyncio

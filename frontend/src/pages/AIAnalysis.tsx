@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useAIHistory, useRunAnalysis, useRunOneOnOnePrep, useRunTeamHealth } from '@/hooks/useAI'
 import { useAISettings, useAICostEstimate } from '@/hooks/useAISettings'
@@ -27,6 +27,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import AnalysisResultRenderer from '@/components/ai/AnalysisResultRenderer'
 import { AlertTriangle, Info, RefreshCw } from 'lucide-react'
@@ -78,9 +79,10 @@ function CostEstimateLine({ feature, scopeType, scopeId, dateFrom, dateTo }: {
   const estimate = useAICostEstimate()
 
   // Fetch on mount
-  useState(() => {
+  useEffect(() => {
     estimate.mutate({ feature, scope_type: scopeType, scope_id: scopeId, date_from: dateFrom, date_to: dateTo })
-  })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feature, scopeType, scopeId, dateFrom, dateTo])
 
   if (estimate.isPending) {
     return <Skeleton className="h-4 w-48" />
@@ -250,39 +252,30 @@ export default function AIAnalysis() {
                   <div className="space-y-4">
                     <div className="space-y-1.5">
                       <label className="text-sm font-medium">Analysis Type</label>
-                      <select
-                        className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
-                        value={form.analysis_type}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            analysis_type: e.target.value as AIAnalyzeRequest['analysis_type'],
-                          })
-                        }
-                      >
-                        <option value="communication">Communication</option>
-                        <option value="conflict">Conflict</option>
-                        <option value="sentiment">Sentiment</option>
-                      </select>
+                      <Select value={form.analysis_type} onValueChange={(v) => setForm({ ...form, analysis_type: v as AIAnalyzeRequest['analysis_type'] })}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="communication">Communication</SelectItem>
+                          <SelectItem value="conflict">Conflict</SelectItem>
+                          <SelectItem value="sentiment">Sentiment</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
 
                     <div className="space-y-1.5">
                       <label className="text-sm font-medium">Scope</label>
-                      <select
-                        className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
-                        value={form.scope_type}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            scope_type: e.target.value as AIAnalyzeRequest['scope_type'],
-                            scope_id: '',
-                          })
-                        }
-                      >
-                        <option value="developer">Developer</option>
-                        <option value="team">Team</option>
-                        <option value="repo">Repository</option>
-                      </select>
+                      <Select value={form.scope_type} onValueChange={(v) => setForm({ ...form, scope_type: v as AIAnalyzeRequest['scope_type'], scope_id: '' })}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="developer">Developer</SelectItem>
+                          <SelectItem value="team">Team</SelectItem>
+                          <SelectItem value="repo">Repository</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
 
                     <div className="space-y-1.5">
@@ -293,29 +286,29 @@ export default function AIAnalysis() {
                             ? 'Team'
                             : 'Repository'}
                       </label>
-                      <select
-                        className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
-                        value={form.scope_id}
-                        onChange={(e) => setForm({ ...form, scope_id: e.target.value })}
-                      >
-                        <option value="">Select...</option>
-                        {form.scope_type === 'developer' &&
-                          (developers ?? []).map((d) => (
-                            <option key={d.id} value={String(d.id)}>
-                              {d.display_name} (@{d.github_username})
-                            </option>
-                          ))}
-                        {form.scope_type === 'team' &&
-                          teams.map((t) => (
-                            <option key={t} value={t}>{t}</option>
-                          ))}
-                        {form.scope_type === 'repo' &&
-                          (repos ?? []).map((r) => (
-                            <option key={r.id} value={String(r.id)}>
-                              {r.full_name}
-                            </option>
-                          ))}
-                      </select>
+                      <Select value={form.scope_id || undefined} onValueChange={(v) => setForm({ ...form, scope_id: v })}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {form.scope_type === 'developer' &&
+                            (developers ?? []).map((d) => (
+                              <SelectItem key={d.id} value={String(d.id)}>
+                                {d.display_name} (@{d.github_username})
+                              </SelectItem>
+                            ))}
+                          {form.scope_type === 'team' &&
+                            teams.map((t) => (
+                              <SelectItem key={t} value={t}>{t}</SelectItem>
+                            ))}
+                          {form.scope_type === 'repo' &&
+                            (repos ?? []).map((r) => (
+                              <SelectItem key={r.id} value={String(r.id)}>
+                                {r.full_name}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
                     </div>
 
                     <p className="text-sm text-muted-foreground">
@@ -388,18 +381,18 @@ export default function AIAnalysis() {
               <CardContent className="flex flex-wrap items-end gap-4 pt-4">
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium">Developer</label>
-                  <select
-                    className="flex h-9 w-full min-w-[200px] rounded-md border bg-background px-3 py-1 text-sm"
-                    value={prepDevId}
-                    onChange={(e) => setPrepDevId(e.target.value)}
-                  >
-                    <option value="">Select developer...</option>
-                    {(developers ?? []).map((d) => (
-                      <option key={d.id} value={String(d.id)}>
-                        {d.display_name} (@{d.github_username})
-                      </option>
-                    ))}
-                  </select>
+                  <Select value={prepDevId || undefined} onValueChange={setPrepDevId}>
+                    <SelectTrigger className="min-w-[200px]">
+                      <SelectValue placeholder="Select developer..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(developers ?? []).map((d) => (
+                        <SelectItem key={d.id} value={String(d.id)}>
+                          {d.display_name} (@{d.github_username})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="text-sm text-muted-foreground">
                   {dateFrom} to {dateTo}
@@ -448,16 +441,17 @@ export default function AIAnalysis() {
               <CardContent className="flex flex-wrap items-end gap-4 pt-4">
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium">Team</label>
-                  <select
-                    className="flex h-9 w-full min-w-[200px] rounded-md border bg-background px-3 py-1 text-sm"
-                    value={healthTeam}
-                    onChange={(e) => setHealthTeam(e.target.value)}
-                  >
-                    <option value="">All teams</option>
-                    {teams.map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </select>
+                  <Select value={healthTeam || '__all__'} onValueChange={(v) => setHealthTeam(v === '__all__' ? '' : v)}>
+                    <SelectTrigger className="min-w-[200px]">
+                      <SelectValue placeholder="All teams" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">All teams</SelectItem>
+                      {teams.map((t) => (
+                        <SelectItem key={t} value={t}>{t}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="text-sm text-muted-foreground">
                   {dateFrom} to {dateTo}

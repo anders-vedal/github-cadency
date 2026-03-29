@@ -50,14 +50,7 @@ def _canonical_pair(a: int, b: int) -> tuple[int, int]:
     return (min(a, b), max(a, b))
 
 
-def _default_range(
-    date_from: datetime | None, date_to: datetime | None
-) -> tuple[datetime, datetime]:
-    if date_to is None:
-        date_to = datetime.now(timezone.utc)
-    if date_from is None:
-        date_from = date_to - timedelta(days=30)
-    return date_from, date_to
+from app.services.utils import default_range as _default_range
 
 
 async def recompute_collaboration_scores(

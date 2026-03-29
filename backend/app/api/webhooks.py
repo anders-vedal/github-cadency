@@ -10,6 +10,7 @@ from app.config import settings
 from app.models.database import AsyncSessionLocal
 from app.models.models import Issue, PullRequest, Repository
 from app.services.github_sync import (
+    compute_approval_metrics,
     github_get,
     github_get_paginated,
     recompute_review_quality_tiers,
@@ -103,6 +104,7 @@ async def handle_pull_request(db, client: httpx.AsyncClient, payload: dict):
         await upsert_review_comment(db, comment_data, pr)
     await db.flush()
     await recompute_review_quality_tiers(db, pr)
+    await compute_approval_metrics(db, pr)
 
 
 async def handle_pull_request_review(db, client: httpx.AsyncClient, payload: dict):
@@ -132,6 +134,7 @@ async def handle_pull_request_review(db, client: httpx.AsyncClient, payload: dic
         await upsert_review_comment(db, comment_data, pr)
     await db.flush()
     await recompute_review_quality_tiers(db, pr)
+    await compute_approval_metrics(db, pr)
 
 
 async def handle_pull_request_review_comment(

@@ -32,7 +32,7 @@ For the complete endpoint catalog, see [docs/API.md](../API.md).
 
 | Dependency | Returns | Usage |
 |------------|---------|-------|
-| `get_current_user` | `AuthUser` | Any authenticated user; 401 on failure |
+| `get_current_user` | `AuthUser` | Decodes JWT + checks `developers.is_active` via DB; 401 if invalid, expired, deactivated, or deleted |
 | `require_admin` | `AuthUser` | Admin only; 403 if `app_role != "admin"` |
 
 ### Auth Patterns by Router
@@ -47,6 +47,7 @@ For the complete endpoint catalog, see [docs/API.md](../API.md).
 | `ai_analysis.py` | Router-level `dependencies=[Depends(require_admin)]` |
 | `webhooks.py` | HMAC `X-Hub-Signature-256` (manual verification, no JWT) |
 | `relationships.py` | Per-endpoint (GET relationships/works-with: `get_current_user` with self-check; POST/DELETE/org-tree/over-tagged/communication-scores: `require_admin`) |
+| `slack.py` | Per-endpoint (config/test/notifications: `require_admin`; user-settings GET/PATCH: `get_current_user`; user-settings/{id}: `require_admin`) |
 
 ## Route Organization
 
@@ -64,6 +65,7 @@ All routers registered under `/api` prefix:
 | `goals` | `/api/goals/*` | goals |
 | `ai_analysis` | `/api/ai/*` | ai |
 | `relationships` | `/api/developers/{id}/relationships`, `/api/org-tree`, `/api/developers/{id}/works-with`, `/api/stats/over-tagged`, `/api/stats/communication-scores` | relationships |
+| `slack` | `/api/slack/*` | slack |
 
 Plus standalone `GET /api/health` (no auth) in `main.py`.
 
@@ -131,7 +133,7 @@ Routers perform `db.get(Model, id)` before delegating to services for endpoints 
 
 | Severity | Area | Description |
 |----------|------|-------------|
-| High | Bug | `sync.py` references `httpx.HTTPStatusError` at line ~243 but never imports `httpx` -- `discover_repos` would raise `NameError` if the GitHub call fails |
+| ~~High~~ | ~~Bug~~ | ~~`sync.py` references `httpx.HTTPStatusError` but never imports `httpx`~~ — **Fixed**: `import httpx` added |
 | Medium | Boundaries | `ai_settings.check_feature_enabled` and `ai_analysis.run_*` raise `HTTPException` from service layer |
 | Medium | Thin router | `POST /ai/estimate` has significant inline business logic (~75 lines) |
 | Medium | Organization | `/api/stats/over-tagged` and `/api/stats/communication-scores` are defined in `relationships.py`, not `stats.py` -- path prefix doesn't match router module |

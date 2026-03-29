@@ -424,6 +424,56 @@ export interface CollaborationResponse {
   insights: CollaborationInsights
 }
 
+export interface PairRelationship {
+  label: string
+  confidence: number
+  explanation: string
+}
+
+export interface PairReviewedPR {
+  pr_id: number
+  pr_number: number
+  title: string
+  html_url: string | null
+  repo_full_name: string
+  review_state: string | null
+  quality_tier: string
+  comment_count: number
+  additions: number | null
+  deletions: number | null
+  submitted_at: string | null
+}
+
+export interface CommentTypeBreakdown {
+  comment_type: string
+  count: number
+}
+
+export interface QualityTierBreakdown {
+  tier: string
+  count: number
+}
+
+export interface CollaborationPairDetail {
+  reviewer_id: number
+  reviewer_name: string
+  reviewer_avatar_url: string | null
+  reviewer_team: string | null
+  author_id: number
+  author_name: string
+  author_avatar_url: string | null
+  author_team: string | null
+  total_reviews: number
+  approval_rate: number
+  changes_requested_rate: number
+  avg_quality_tier: string
+  quality_tier_breakdown: QualityTierBreakdown[]
+  comment_type_breakdown: CommentTypeBreakdown[]
+  total_comments: number
+  relationship: PairRelationship
+  recent_prs: PairReviewedPR[]
+}
+
 // --- Goals (M6 + P1-03) ---
 
 export type GoalMetricKey =
@@ -639,6 +689,9 @@ export interface DeploymentDetail {
   workflow_name: string | null
   status: string | null
   lead_time_hours: number | null
+  is_failure: boolean
+  failure_detected_via: string | null
+  recovery_time_hours: number | null
 }
 
 export interface DORAMetricsResponse {
@@ -649,6 +702,13 @@ export interface DORAMetricsResponse {
   total_deployments: number
   period_days: number
   deployments: DeploymentDetail[]
+  total_all_deployments: number
+  change_failure_rate: number | null
+  cfr_band: string
+  avg_mttr_hours: number | null
+  mttr_band: string
+  failure_deployments: number
+  overall_band: string
 }
 
 // --- Work Categorization (P4-02) ---
@@ -871,4 +931,80 @@ export interface CommunicationScoreEntry {
 
 export interface CommunicationScoresResponse {
   developers: CommunicationScoreEntry[]
+}
+
+// --- Slack Integration ---
+
+export interface SlackConfigResponse {
+  slack_enabled: boolean
+  bot_token_configured: boolean
+  default_channel: string | null
+  notify_stale_prs: boolean
+  notify_high_risk_prs: boolean
+  notify_workload_alerts: boolean
+  notify_sync_failures: boolean
+  notify_sync_complete: boolean
+  notify_weekly_digest: boolean
+  stale_pr_days_threshold: number
+  risk_score_threshold: number
+  digest_day_of_week: number
+  digest_hour_utc: number
+  stale_check_hour_utc: number
+  updated_at: string
+  updated_by: string | null
+}
+
+export interface SlackConfigUpdate {
+  slack_enabled?: boolean
+  bot_token?: string
+  default_channel?: string | null
+  notify_stale_prs?: boolean
+  notify_high_risk_prs?: boolean
+  notify_workload_alerts?: boolean
+  notify_sync_failures?: boolean
+  notify_sync_complete?: boolean
+  notify_weekly_digest?: boolean
+  stale_pr_days_threshold?: number
+  risk_score_threshold?: number
+  digest_day_of_week?: number
+  digest_hour_utc?: number
+  stale_check_hour_utc?: number
+}
+
+export interface SlackUserSettingsResponse {
+  developer_id: number
+  slack_user_id: string | null
+  notify_stale_prs: boolean
+  notify_high_risk_prs: boolean
+  notify_workload_alerts: boolean
+  notify_weekly_digest: boolean
+}
+
+export interface SlackUserSettingsUpdate {
+  slack_user_id?: string | null
+  notify_stale_prs?: boolean
+  notify_high_risk_prs?: boolean
+  notify_workload_alerts?: boolean
+  notify_weekly_digest?: boolean
+}
+
+export interface NotificationLogEntry {
+  id: number
+  notification_type: string
+  channel: string | null
+  recipient_developer_id: number | null
+  status: string
+  error_message: string | null
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface NotificationHistoryResponse {
+  notifications: NotificationLogEntry[]
+  total: number
+}
+
+export interface SlackTestResponse {
+  success: boolean
+  message: string
 }

@@ -4,6 +4,7 @@ import { useDateRange } from '@/hooks/useDateRange'
 import { useCollaboration } from '@/hooks/useStats'
 import { useDevelopers } from '@/hooks/useDevelopers'
 import ErrorCard from '@/components/ErrorCard'
+import PairDetailSheet from '@/components/PairDetailSheet'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -13,6 +14,7 @@ import type { CollaborationPair, CollaborationInsights } from '@/utils/types'
 export default function CollaborationMatrix() {
   const { dateFrom, dateTo } = useDateRange()
   const [teamFilter, setTeamFilter] = useState<string>('')
+  const [selectedPair, setSelectedPair] = useState<{ reviewerId: number; authorId: number } | null>(null)
 
   const { data, isLoading, isError, refetch } = useCollaboration(teamFilter || undefined, dateFrom, dateTo)
   const { data: developers } = useDevelopers()
@@ -66,15 +68,22 @@ export default function CollaborationMatrix() {
         )}
       </div>
 
-      <HeatmapGrid matrix={data.matrix} />
+      <HeatmapGrid matrix={data.matrix} onCellClick={(reviewerId, authorId) => setSelectedPair({ reviewerId, authorId })} />
       <InsightsPanel insights={data.insights} />
+
+      <PairDetailSheet
+        reviewerId={selectedPair?.reviewerId ?? null}
+        authorId={selectedPair?.authorId ?? null}
+        open={selectedPair !== null}
+        onOpenChange={(open) => { if (!open) setSelectedPair(null) }}
+      />
     </div>
   )
 }
 
 // --- Heatmap Grid ---
 
-function HeatmapGrid({ matrix }: { matrix: CollaborationPair[] }) {
+function HeatmapGrid({ matrix, onCellClick }: { matrix: CollaborationPair[]; onCellClick: (reviewerId: number, authorId: number) => void }) {
   const [hoveredCell, setHoveredCell] = useState<{ reviewer: string; author: string } | null>(null)
 
   // Build unique reviewer and author lists
@@ -143,14 +152,17 @@ function HeatmapGrid({ matrix }: { matrix: CollaborationPair[] }) {
                   const isSelf = r.id === a.id
                   const isHovered = hoveredCell?.reviewer === r.name && hoveredCell?.author === a.name
 
+                  const isClickable = !isSelf && count > 0
+
                   return (
                     <div
                       key={`c-${r.id}-${a.id}`}
                       className={cn(
-                        'relative flex items-center justify-center rounded-sm text-[10px] font-medium transition-all cursor-default',
-                        isSelf ? 'bg-muted/50' : 'hover:ring-1 hover:ring-foreground/20',
+                        'relative flex items-center justify-center rounded-sm text-[10px] font-medium transition-all',
+                        isSelf ? 'bg-muted/50 cursor-default' : count > 0 ? 'cursor-pointer hover:ring-2 hover:ring-primary/50' : 'cursor-default hover:ring-1 hover:ring-foreground/20',
                         isHovered && 'ring-2 ring-primary'
                       )}
+                      onClick={isClickable ? () => onCellClick(r.id, a.id) : undefined}
                       style={{
                         backgroundColor: isSelf
                           ? undefined

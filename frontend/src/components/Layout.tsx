@@ -35,6 +35,7 @@ const adminNavItems: NavEntry[] = [
       { to: '/admin/sync', label: 'Sync' },
       { to: '/admin/ai', label: 'AI Analysis' },
       { to: '/admin/ai/settings', label: 'AI Settings' },
+      { to: '/admin/slack', label: 'Slack' },
     ],
   },
 ]

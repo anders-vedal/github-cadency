@@ -11,6 +11,35 @@ class TestJWTAuth:
         assert resp.status_code in (401, 403)
 
     @pytest.mark.asyncio
+    async def test_deactivated_user_returns_401(self, raw_client, db_session, sample_developer):
+        """A deactivated developer's existing JWT should be rejected."""
+        token = make_developer_token(
+            developer_id=sample_developer.id,
+            github_username=sample_developer.github_username,
+        )
+        # Deactivate the developer
+        sample_developer.is_active = False
+        db_session.add(sample_developer)
+        await db_session.commit()
+
+        resp = await raw_client.get(
+            f"/api/stats/developer/{sample_developer.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401
+        assert "deactivated" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_deleted_developer_returns_401(self, raw_client):
+        """A JWT for a non-existent developer_id should be rejected."""
+        token = make_developer_token(developer_id=99999, github_username="ghost")
+        resp = await raw_client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
     async def test_invalid_jwt_returns_401(self, raw_client):
         resp = await raw_client.get(
             "/api/developers",

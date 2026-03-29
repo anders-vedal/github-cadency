@@ -24,6 +24,9 @@ related:
 | `work_category` | `services/work_category.py` | ~350 | Work categorization: label/title/AI classification |
 | `relationships` | `services/relationships.py` | ~180 | Developer relationship CRUD + org tree builder |
 | `enhanced_collaboration` | `services/enhanced_collaboration.py` | ~400 | Multi-signal collaboration scoring, works-with, over-tagged, communication scores |
+| `slack` | `services/slack.py` | ~350 | Slack config/user settings CRUD, notification senders (DM + channel), scheduled jobs |
+| `exceptions` | `services/exceptions.py` | ~25 | Custom service-layer exceptions (`AIFeatureDisabledError`, `AIBudgetExceededError`) |
+| `utils` | `services/utils.py` | ~15 | Shared utilities (`default_range` date defaulting) |
 
 ## Cross-Service Dependencies
 
@@ -39,6 +42,10 @@ work_category
 
 github_sync
   -> enhanced_collaboration (post-sync recompute_collaboration_scores -- lazy import, non-blocking)
+  -> slack                  (post-sync send_sync_notification -- lazy import, non-blocking)
+
+slack
+  -> stats         (get_team_stats for weekly digest)
 
 stats            (standalone)
 collaboration    (standalone)
@@ -46,7 +53,9 @@ enhanced_collaboration (standalone)
 relationships    (standalone)
 risk             (standalone)
 goals            (standalone)
-ai_settings      (standalone)
+ai_settings
+  -> exceptions  (raises AIFeatureDisabledError)
+slack            (standalone except for stats dependency in weekly digest)
 ```
 
 All cross-service imports are **deferred** (inside function bodies) to avoid circular import at module load time.
@@ -111,7 +120,7 @@ Each repo goes through these sequential steps (tracked via `current_step`):
 3. **fetching_issues / processing_issues**: Fetch and upsert issues (excluding PRs). Commit every 10.
 4. **processing_issue_comments**: Fetch and upsert all issue comments
 5. **syncing_file_tree**: DELETE all + INSERT fresh from Git Trees API
-6. **fetching_deployments**: GitHub Actions workflow runs (only if `DEPLOY_WORKFLOW_NAME` set)
+6. **fetching_deployments**: GitHub Actions workflow runs (only if `DEPLOY_WORKFLOW_NAME` set). Fetches all completed runs (success + failure), computes lead times for successful deploys, then runs `detect_deployment_failures()` to flag failures (3 signals: failed workflow, revert PRs within 48h, hotfix PRs within 48h) and link recovery deployments for MTTR.
 
 ### Error Isolation
 
@@ -121,6 +130,10 @@ Per-repo failure is isolated via rollback + merge pattern:
 3. `await db.merge(sync_event)` -- re-attach detached object
 4. Restore log_summary, append to `repos_failed` and `errors`
 5. Commit and continue to next repo
+
+### Concurrency Control
+
+`run_sync()` uses a PostgreSQL advisory lock (`pg_advisory_lock`) to prevent TOCTOU race between the "is another sync running?" check and the SyncEvent INSERT. Lock is acquired before the check and released after the INSERT commits. SQLite (tests) gracefully skips the advisory lock.
 
 ### Cancellation
 
@@ -132,7 +145,7 @@ Per-repo failure is isolated via rollback + merge pattern:
 
 ### Backfill
 
-`backfill_author_links()` bulk-updates NULL `author_id`/`reviewer_id`/`assignee_id` FKs using stored `_github_username` columns with EXISTS guard. Called after every sync.
+`backfill_author_links()` bulk-updates NULL `author_id`/`reviewer_id`/`assignee_id` FKs using stored `_github_username` columns with EXISTS guard. Called after every sync. Post-backfill, `recompute_collaboration_scores()` runs with `since_override` or a 90-day window for full syncs (not the default 30 days).
 
 ### Active Developer Filtering
 
@@ -150,9 +163,11 @@ Individual developer stats (`get_developer_stats`, `get_developer_trends`) and g
 
 ### Guard Chain (every AI call)
 
-1. `check_feature_enabled(db, feature_name)` -- checks master switch + per-feature toggle. Raises 403.
-2. `check_budget(db, ai_settings)` -- sums current month tokens. Raises 429 if over budget.
+1. `check_feature_enabled(db, feature_name)` -- checks master switch + per-feature toggle. Raises `AIFeatureDisabledError`.
+2. `check_budget(db, ai_settings)` -- sums current month tokens. Raises `AIBudgetExceededError` if over budget.
 3. `find_recent_analysis(db, ...)` -- dedup within cooldown window. Returns cached result if found.
+
+API routes catch `AIFeatureDisabledError` → 403 and `AIBudgetExceededError` → 429. Custom exceptions from `services/exceptions.py` keep services decoupled from FastAPI's HTTP layer.
 
 ### Dedup Mechanism
 
@@ -160,7 +175,7 @@ Reused analyses store `reused_from_id` pointing to the original. Budget excludes
 
 ### Claude API Call
 
-`anthropic.AsyncAnthropic`, model `claude-sonnet-4-0`, `max_tokens=4096`. Response parsed as JSON; on parse failure stored as `{"raw_text": ..., "parse_error": True}`.
+`anthropic.AsyncAnthropic`, model `claude-sonnet-4-0`, `max_tokens=4096`, `max_retries=3`, `timeout=120s`. Response parsed as JSON; on parse failure stored as `{"raw_text": ..., "parse_error": True}`.
 
 ## Key Algorithms
 
@@ -219,9 +234,9 @@ Three tiers: (1) label map (exact lowercase), (2) title regex patterns, (3) "unk
 
 | Severity | Area | Description |
 |----------|------|-------------|
-| High | Boundaries | `ai_settings.check_feature_enabled` and `ai_analysis.run_*` raise `HTTPException` from service layer -- breaks if called from non-HTTP context |
-| Medium | Performance | `_compute_per_developer_metrics()` fires ~9 queries per developer -- O(N) round trips for benchmarks |
-| Medium | Sync | TOCTOU race on sync start -- three optimistic reads without DB-level locking |
+| ~~High~~ | ~~Boundaries~~ | ~~`ai_settings.check_feature_enabled` and `ai_analysis.run_*` raise `HTTPException` from service layer~~ — **Resolved:** Services now raise `AIFeatureDisabledError`/`AIBudgetExceededError` from `services/exceptions.py`; API routes catch and convert |
+| ~~Medium~~ | ~~Performance~~ | ~~`_compute_per_developer_metrics()` fires ~9 queries per developer~~ — **Resolved:** Rewritten as 4 batch GROUP BY queries |
+| ~~Medium~~ | ~~Sync~~ | ~~TOCTOU race on sync start without DB-level locking~~ — **Resolved:** PostgreSQL advisory lock wraps check+insert |
 | Medium | Side effect | `get_goal_progress()` auto-achieves goals during what appears to be a read operation |
 | Low | DRY | `_default_range()` duplicated in 5 service files (stats, collaboration, risk, work_category, enhanced_collaboration) |
 | Low | AI data | Correlated subquery in `_gather_developer_texts()` for issue comment filtering |

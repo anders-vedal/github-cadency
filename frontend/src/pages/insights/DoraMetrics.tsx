@@ -6,9 +6,10 @@ import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
+import DeploymentTimeline from '@/components/charts/DeploymentTimeline'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { HelpCircle, Rocket, Clock, Info } from 'lucide-react'
+import { HelpCircle, Rocket, Clock, AlertTriangle, TimerReset, Shield, Info } from 'lucide-react'
 import {
   Table,
   TableBody,
@@ -17,6 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Badge } from '@/components/ui/badge'
 
 const bandColors: Record<string, string> = {
   elite: 'text-emerald-600 dark:text-emerald-400',
@@ -46,6 +48,16 @@ function formatDate(iso: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function formatFailureVia(via: string | null): string {
+  if (!via) return '—'
+  const map: Record<string, string> = {
+    failed_deploy: 'Failed deploy',
+    revert_pr: 'Revert PR',
+    hotfix_pr: 'Hotfix PR',
+  }
+  return map[via] ?? via
 }
 
 export default function DoraMetrics() {
@@ -80,7 +92,7 @@ export default function DoraMetrics() {
               <HelpCircle className="h-4 w-4 text-muted-foreground" />
             </TooltipTrigger>
             <TooltipContent className="max-w-xs">
-              DORA (DevOps Research and Assessment) metrics measure software delivery performance. Deploy Frequency and Change Lead Time are tracked from GitHub Actions workflow runs.
+              DORA (DevOps Research and Assessment) metrics measure software delivery performance across four key dimensions: Deployment Frequency, Lead Time for Changes, Change Failure Rate, and Mean Time to Recovery.
             </TooltipContent>
           </Tooltip>
         </div>
@@ -111,20 +123,36 @@ export default function DoraMetrics() {
         </Card>
       ) : (
         <>
-          {/* Summary cards */}
+          {/* Summary cards — 6 metrics in 3x2 grid */}
           {isLoading ? (
-            <div className="grid gap-4 sm:grid-cols-4">
-              {Array.from({ length: 4 }).map((_, i) => (
+            <div className="grid gap-4 sm:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
                 <StatCardSkeleton key={i} />
               ))}
             </div>
           ) : data ? (
-            <div className="grid gap-4 sm:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-3">
               <StatCard
                 title="Deploy Frequency"
                 value={data.deploy_frequency > 0 ? `${data.deploy_frequency.toFixed(2)}/day` : '—'}
                 subtitle={`${data.total_deployments} deploys in ${data.period_days}d`}
-                tooltip="Average number of successful deployments per day in the selected period. Calculated from GitHub Actions workflow runs matching DEPLOY_WORKFLOW_NAME."
+                tooltip="Average number of successful deployments per day. Calculated from GitHub Actions workflow runs."
+              />
+              <StatCard
+                title="Avg Lead Time"
+                value={data.avg_lead_time_hours != null ? formatLeadTime(data.avg_lead_time_hours) : '—'}
+                tooltip="Average time from the oldest undeployed merged PR to the deployment completing."
+              />
+              <StatCard
+                title="Change Failure Rate"
+                value={data.change_failure_rate != null ? `${data.change_failure_rate.toFixed(1)}%` : '—'}
+                subtitle={`${data.failure_deployments} failure${data.failure_deployments !== 1 ? 's' : ''} of ${data.total_all_deployments} total`}
+                tooltip="Percentage of deployments that cause a production failure, detected via failed workflow runs, revert PRs, or hotfix PRs."
+              />
+              <StatCard
+                title="Avg MTTR"
+                value={data.avg_mttr_hours != null ? formatLeadTime(data.avg_mttr_hours) : '—'}
+                tooltip="Mean Time to Recovery — average time between a failure deployment and the next successful deployment."
               />
               <StatCard
                 title="Frequency Band"
@@ -135,12 +163,6 @@ export default function DoraMetrics() {
                     : data.deploy_frequency_band === 'medium' ? 'Weekly to monthly'
                     : 'Less than monthly'
                 }
-                tooltip="DORA benchmark classification: Elite (multiple/day), High (daily–weekly), Medium (weekly–monthly), Low (<monthly)."
-              />
-              <StatCard
-                title="Avg Lead Time"
-                value={data.avg_lead_time_hours != null ? formatLeadTime(data.avg_lead_time_hours) : '—'}
-                tooltip="Average time from the oldest undeployed merged PR to the deployment completing. Measures how quickly code reaches production after merge."
               />
               <StatCard
                 title="Lead Time Band"
@@ -151,21 +173,31 @@ export default function DoraMetrics() {
                     : data.lead_time_band === 'medium' ? 'Less than 1 week'
                     : 'More than 1 week'
                 }
-                tooltip="DORA benchmark classification: Elite (<1h), High (<1 day), Medium (<1 week), Low (>1 week)."
               />
             </div>
           ) : null}
 
-          {/* Band indicator strip */}
+          {/* Band performance strip — 5 indicators */}
           {data && (
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-5">
+              <Card>
+                <CardContent className="flex items-center gap-3 py-4">
+                  <Shield className="h-5 w-5 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm text-muted-foreground">Overall DORA</p>
+                    <p className={`text-lg font-semibold ${bandColors[data.overall_band] ?? ''}`}>
+                      {bandLabels[data.overall_band] ?? data.overall_band} Performer
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
               <Card>
                 <CardContent className="flex items-center gap-3 py-4">
                   <Rocket className="h-5 w-5 text-muted-foreground" />
                   <div>
-                    <p className="text-sm text-muted-foreground">Deployment Frequency</p>
+                    <p className="text-sm text-muted-foreground">Deploy Frequency</p>
                     <p className={`text-lg font-semibold ${bandColors[data.deploy_frequency_band] ?? ''}`}>
-                      {bandLabels[data.deploy_frequency_band] ?? data.deploy_frequency_band} Performer
+                      {bandLabels[data.deploy_frequency_band] ?? data.deploy_frequency_band}
                     </p>
                   </div>
                 </CardContent>
@@ -174,14 +206,41 @@ export default function DoraMetrics() {
                 <CardContent className="flex items-center gap-3 py-4">
                   <Clock className="h-5 w-5 text-muted-foreground" />
                   <div>
-                    <p className="text-sm text-muted-foreground">Change Lead Time</p>
+                    <p className="text-sm text-muted-foreground">Lead Time</p>
                     <p className={`text-lg font-semibold ${bandColors[data.lead_time_band] ?? ''}`}>
-                      {bandLabels[data.lead_time_band] ?? data.lead_time_band} Performer
+                      {bandLabels[data.lead_time_band] ?? data.lead_time_band}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="flex items-center gap-3 py-4">
+                  <AlertTriangle className="h-5 w-5 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm text-muted-foreground">Failure Rate</p>
+                    <p className={`text-lg font-semibold ${bandColors[data.cfr_band] ?? ''}`}>
+                      {bandLabels[data.cfr_band] ?? data.cfr_band}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="flex items-center gap-3 py-4">
+                  <TimerReset className="h-5 w-5 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm text-muted-foreground">Recovery Time</p>
+                    <p className={`text-lg font-semibold ${bandColors[data.mttr_band] ?? ''}`}>
+                      {bandLabels[data.mttr_band] ?? data.mttr_band}
                     </p>
                   </div>
                 </CardContent>
               </Card>
             </div>
+          )}
+
+          {/* Deployment Timeline */}
+          {data && data.deployments.length > 0 && (
+            <DeploymentTimeline deployments={data.deployments} />
           )}
 
           {/* Recent deployments table */}
@@ -194,14 +253,14 @@ export default function DoraMetrics() {
                     <HelpCircle className="h-4 w-4 text-muted-foreground" />
                   </TooltipTrigger>
                   <TooltipContent className="max-w-xs">
-                    Last 20 deployments in the selected period, with per-deployment lead time from oldest undeployed merged PR.
+                    Last 20 deployments in the selected period, including both successes and failures.
                   </TooltipContent>
                 </Tooltip>
               </div>
             </CardHeader>
             <CardContent>
               {isLoading ? (
-                <TableSkeleton columns={5} rows={5} />
+                <TableSkeleton columns={7} rows={5} />
               ) : !data || data.deployments.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No deployments in this period.</p>
               ) : (
@@ -210,22 +269,38 @@ export default function DoraMetrics() {
                     <TableRow>
                       <TableHead>Deployed At</TableHead>
                       <TableHead>Repository</TableHead>
+                      <TableHead>Status</TableHead>
                       <TableHead>Workflow</TableHead>
                       <TableHead>SHA</TableHead>
                       <TableHead className="text-right">Lead Time</TableHead>
+                      <TableHead className="text-right">Recovery</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {data.deployments.map((d) => (
-                      <TableRow key={d.id}>
+                      <TableRow key={d.id} className={d.is_failure ? 'bg-red-50/50 dark:bg-red-950/20' : ''}>
                         <TableCell className="text-sm">{formatDate(d.deployed_at)}</TableCell>
                         <TableCell className="font-mono text-sm">{d.repo_name ?? '—'}</TableCell>
+                        <TableCell>
+                          {d.is_failure ? (
+                            <Badge variant="destructive" className="text-xs">
+                              {formatFailureVia(d.failure_detected_via)}
+                            </Badge>
+                          ) : (
+                            <Badge variant="secondary" className="text-xs">
+                              {d.status ?? 'success'}
+                            </Badge>
+                          )}
+                        </TableCell>
                         <TableCell className="text-sm">{d.workflow_name ?? '—'}</TableCell>
                         <TableCell className="font-mono text-xs text-muted-foreground">
                           {d.sha?.substring(0, 7) ?? '—'}
                         </TableCell>
                         <TableCell className="text-right font-medium">
                           {d.lead_time_hours != null ? formatLeadTime(d.lead_time_hours) : '—'}
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {d.recovery_time_hours != null ? formatLeadTime(d.recovery_time_hours) : '—'}
                         </TableCell>
                       </TableRow>
                     ))}

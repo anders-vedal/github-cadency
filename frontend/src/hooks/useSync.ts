@@ -64,7 +64,6 @@ export function useToggleTracking() {
       }),
     onSuccess: (_data, { isTracked }) => {
       qc.invalidateQueries({ queryKey: ['repos'] })
-      qc.invalidateQueries({ queryKey: ['sync-repos'] })
       toast.success(isTracked ? 'Repository tracking enabled' : 'Repository tracking disabled')
     },
     onError: () => toast.error('Failed to update tracking'),

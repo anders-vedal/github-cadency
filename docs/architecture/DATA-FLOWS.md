@@ -37,8 +37,9 @@ Resume: `api/sync.py:resume_sync()` computes remaining repo IDs from `repos_comp
    d. sync_repo(ctx, repo, since=...)
 7. backfill_author_links(db) -> bulk UPDATE null FKs
 8. recompute_collaboration_scores(db, since, now) -> materialized pair scores (non-blocking on failure)
-9. Set status: completed | completed_with_errors | failed | cancelled
-9. finally: clear progress, set completed_at/duration_s, commit
+9. send_sync_notification(db, sync_event) -> Slack notification (non-blocking on failure)
+10. Set status: completed | completed_with_errors | failed | cancelled
+10. finally: clear progress, set completed_at/duration_s, commit
 ```
 
 ### Per-Repo Sync (`services/github_sync.py:sync_repo`)
@@ -226,7 +227,8 @@ UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
 
 Per-request auth:
 1. apiFetch() adds Authorization: Bearer <token> header
-2. Backend: get_current_user() decodes JWT, returns AuthUser
+2. Backend: get_current_user() decodes JWT, queries developers.is_active
+   - 401 if token invalid/expired, developer not found, or is_active=False
 3. require_admin() checks app_role == "admin"
 4. On 401: frontend clears token, redirects to /login
 ```
@@ -364,11 +366,37 @@ Router registration (main.py):
 - Standalone GET /api/health (no auth)
 ```
 
+## 8. Slack Notification Flow
+
+### Trigger Points
+
+1. **Post-sync** (`github_sync.py`): After sync status determined → `send_sync_notification()` (lazy import, non-blocking)
+2. **Daily stale PR check** (APScheduler hourly → `scheduled_stale_pr_check()`): Checks if current UTC hour matches `stale_check_hour_utc` → `send_stale_pr_nudges()`
+3. **Weekly digest** (APScheduler hourly → `scheduled_weekly_digest()`): Checks day + hour match → `send_weekly_digest()`
+
+### Notification Delivery (`services/slack.py`)
+
+```
+1. Check guards: slack_enabled + bot_token + type-specific toggle
+2. For DM types (stale_pr, high_risk_pr, workload, weekly_digest):
+   a. Get SlackUserSettings for target developer
+   b. Check slack_user_id is set and per-user toggle is enabled
+   c. Send via AsyncWebClient.chat_postMessage(channel=slack_user_id)
+3. For channel types (sync_complete, sync_failure):
+   a. Use config.default_channel
+   b. Send via AsyncWebClient.chat_postMessage(channel=default_channel)
+4. Log to notification_log (status: sent | failed, error_message if failed)
+```
+
+### Configuration
+
+Admin configures via `PATCH /slack/config` (stored in `slack_config` singleton). Each developer configures their Slack user ID and notification preferences via `PATCH /slack/user-settings`. Bot token stored in DB (not env var) for runtime configurability.
+
 ## Architectural Concerns
 
 | Severity | Area | Description |
 |----------|------|-------------|
-| High | Auth | No JWT revocation -- deactivated users retain access up to 7 days (`get_current_user` doesn't check DB) |
+| ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access up to 7 days~~ — **Fixed**: `get_current_user()` now checks `developers.is_active` on every request |
 | Medium | Sync | Auto-reactivation in `resolve_author()` / `sync_org_contributors()` can undo manual deactivation -- if the developer appears in GitHub activity or org members during the next sync, `is_active` is silently set back to `True` (warning log only) |
 | Medium | Webhooks | All-or-nothing commit -- failure in any handler rolls back all event processing |
 | Medium | Webhooks | Review comments on unknown PRs silently dropped (no retry mechanism) |

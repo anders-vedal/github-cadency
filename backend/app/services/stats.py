@@ -39,14 +39,7 @@ from app.schemas.schemas import (
 )
 
 
-def _default_range(
-    date_from: datetime | None, date_to: datetime | None
-) -> tuple[datetime, datetime]:
-    if not date_to:
-        date_to = datetime.now(timezone.utc)
-    if not date_from:
-        date_from = date_to - timedelta(days=30)
-    return date_from, date_to
+from app.services.utils import default_range as _default_range
 
 
 async def get_developer_stats(
@@ -654,7 +647,92 @@ async def _compute_per_developer_metrics(
     date_from: datetime,
     date_to: datetime,
 ) -> dict[str, list[float]]:
-    """Compute benchmark metrics per developer, returning lists of values for percentile calculation."""
+    """Compute benchmark metrics per developer using batch queries (GROUP BY)."""
+    if not dev_ids:
+        return {k: [] for k in [
+            "time_to_merge_h", "time_to_first_review_h", "time_to_approve_h",
+            "time_after_approve_h", "prs_merged", "review_turnaround_h",
+            "reviews_given", "additions_per_pr", "review_rounds",
+        ]}
+
+    dev_set = set(dev_ids)
+
+    # Batch 1: PR author metrics (merged PRs)
+    merged_pr_rows = (await db.execute(
+        select(
+            PullRequest.author_id,
+            func.count().label("prs_merged"),
+            func.avg(PullRequest.time_to_merge_s).label("avg_ttm"),
+            func.avg(PullRequest.time_after_approve_s).label("avg_taa"),
+            func.coalesce(func.sum(PullRequest.additions), 0).label("total_additions"),
+            func.avg(PullRequest.review_round_count).label("avg_rounds"),
+        ).where(
+            PullRequest.author_id.in_(dev_ids),
+            PullRequest.is_merged.is_(True),
+            PullRequest.merged_at >= date_from,
+            PullRequest.merged_at <= date_to,
+        ).group_by(PullRequest.author_id)
+    )).all()
+    merged_map: dict[int, dict] = {}
+    for row in merged_pr_rows:
+        merged_map[row.author_id] = {
+            "prs_merged": row.prs_merged or 0,
+            "avg_ttm": row.avg_ttm,
+            "avg_taa": row.avg_taa,
+            "total_additions": row.total_additions or 0,
+            "avg_rounds": row.avg_rounds,
+        }
+
+    # Batch 2: PR author metrics (created PRs — time to first review, approve)
+    created_pr_rows = (await db.execute(
+        select(
+            PullRequest.author_id,
+            func.avg(PullRequest.time_to_first_review_s).label("avg_ttfr"),
+            func.avg(PullRequest.time_to_approve_s).label("avg_tta"),
+        ).where(
+            PullRequest.author_id.in_(dev_ids),
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+        ).group_by(PullRequest.author_id)
+    )).all()
+    created_map: dict[int, dict] = {}
+    for row in created_pr_rows:
+        created_map[row.author_id] = {
+            "avg_ttfr": row.avg_ttfr,
+            "avg_tta": row.avg_tta,
+        }
+
+    # Batch 3: Reviews given count
+    reviews_rows = (await db.execute(
+        select(
+            PRReview.reviewer_id,
+            func.count().label("reviews_given"),
+        ).where(
+            PRReview.reviewer_id.in_(dev_ids),
+            PRReview.submitted_at >= date_from,
+            PRReview.submitted_at <= date_to,
+        ).group_by(PRReview.reviewer_id)
+    )).all()
+    reviews_map: dict[int, int] = {row.reviewer_id: row.reviews_given for row in reviews_rows}
+
+    # Batch 4: Review turnaround (avg time_to_first_review for PRs each dev reviewed)
+    turnaround_rows = (await db.execute(
+        select(
+            PRReview.reviewer_id,
+            func.avg(PullRequest.time_to_first_review_s).label("avg_turnaround"),
+        )
+        .select_from(PRReview)
+        .join(PullRequest, PRReview.pr_id == PullRequest.id)
+        .where(
+            PRReview.reviewer_id.in_(dev_ids),
+            PullRequest.time_to_first_review_s.isnot(None),
+            PRReview.submitted_at >= date_from,
+            PRReview.submitted_at <= date_to,
+        ).group_by(PRReview.reviewer_id)
+    )).all()
+    turnaround_map: dict[int, float] = {row.reviewer_id: row.avg_turnaround for row in turnaround_rows}
+
+    # Assemble per-developer metrics in consistent order
     metrics: dict[str, list[float]] = {
         "time_to_merge_h": [],
         "time_to_first_review_h": [],
@@ -668,111 +746,25 @@ async def _compute_per_developer_metrics(
     }
 
     for dev_id in dev_ids:
-        # PRs merged
-        prs_merged = await db.scalar(
-            select(func.count()).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.is_merged.is_(True),
-                PullRequest.merged_at >= date_from,
-                PullRequest.merged_at <= date_to,
-            )
-        ) or 0
+        m = merged_map.get(dev_id, {})
+        c = created_map.get(dev_id, {})
+        prs_merged = m.get("prs_merged", 0)
+
         metrics["prs_merged"].append(float(prs_merged))
-
-        # Avg time to merge (hours)
-        avg_ttm = await db.scalar(
-            select(func.avg(PullRequest.time_to_merge_s)).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.is_merged.is_(True),
-                PullRequest.time_to_merge_s.isnot(None),
-                PullRequest.merged_at >= date_from,
-                PullRequest.merged_at <= date_to,
-            )
-        )
+        avg_ttm = m.get("avg_ttm")
         metrics["time_to_merge_h"].append(avg_ttm / 3600 if avg_ttm else 0.0)
-
-        # Avg time to first review (hours) — for PRs authored by this dev
-        avg_ttfr = await db.scalar(
-            select(func.avg(PullRequest.time_to_first_review_s)).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.time_to_first_review_s.isnot(None),
-                PullRequest.created_at >= date_from,
-                PullRequest.created_at <= date_to,
-            )
-        )
+        avg_ttfr = c.get("avg_ttfr")
         metrics["time_to_first_review_h"].append(avg_ttfr / 3600 if avg_ttfr else 0.0)
-
-        # Avg time to approve (hours)
-        avg_tta = await db.scalar(
-            select(func.avg(PullRequest.time_to_approve_s)).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.time_to_approve_s.isnot(None),
-                PullRequest.created_at >= date_from,
-                PullRequest.created_at <= date_to,
-            )
-        )
+        avg_tta = c.get("avg_tta")
         metrics["time_to_approve_h"].append(avg_tta / 3600 if avg_tta else 0.0)
-
-        # Avg time after approve (hours)
-        avg_taa = await db.scalar(
-            select(func.avg(PullRequest.time_after_approve_s)).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.is_merged.is_(True),
-                PullRequest.time_after_approve_s.isnot(None),
-                PullRequest.merged_at >= date_from,
-                PullRequest.merged_at <= date_to,
-            )
-        )
+        avg_taa = m.get("avg_taa")
         metrics["time_after_approve_h"].append(avg_taa / 3600 if avg_taa else 0.0)
-
-        # Reviews given count
-        reviews_given = await db.scalar(
-            select(func.count()).where(
-                PRReview.reviewer_id == dev_id,
-                PRReview.submitted_at >= date_from,
-                PRReview.submitted_at <= date_to,
-            )
-        ) or 0
-        metrics["reviews_given"].append(float(reviews_given))
-
-        # Review turnaround — avg time_to_first_review_s for PRs this dev reviewed
-        avg_turnaround = await db.scalar(
-            select(func.avg(PullRequest.time_to_first_review_s))
-            .select_from(PRReview)
-            .join(PullRequest, PRReview.pr_id == PullRequest.id)
-            .where(
-                PRReview.reviewer_id == dev_id,
-                PullRequest.time_to_first_review_s.isnot(None),
-                PRReview.submitted_at >= date_from,
-                PRReview.submitted_at <= date_to,
-            )
-        )
-        metrics["review_turnaround_h"].append(
-            avg_turnaround / 3600 if avg_turnaround else 0.0
-        )
-
-        # Additions per PR
-        total_additions = await db.scalar(
-            select(func.coalesce(func.sum(PullRequest.additions), 0)).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.is_merged.is_(True),
-                PullRequest.merged_at >= date_from,
-                PullRequest.merged_at <= date_to,
-            )
-        ) or 0
-        metrics["additions_per_pr"].append(
-            total_additions / prs_merged if prs_merged > 0 else 0.0
-        )
-
-        # Avg review rounds (on merged PRs)
-        avg_rounds = await db.scalar(
-            select(func.avg(PullRequest.review_round_count)).where(
-                PullRequest.author_id == dev_id,
-                PullRequest.is_merged.is_(True),
-                PullRequest.merged_at >= date_from,
-                PullRequest.merged_at <= date_to,
-            )
-        )
+        metrics["reviews_given"].append(float(reviews_map.get(dev_id, 0)))
+        avg_turnaround = turnaround_map.get(dev_id)
+        metrics["review_turnaround_h"].append(avg_turnaround / 3600 if avg_turnaround else 0.0)
+        total_additions = m.get("total_additions", 0)
+        metrics["additions_per_pr"].append(total_additions / prs_merged if prs_merged > 0 else 0.0)
+        avg_rounds = m.get("avg_rounds")
         metrics["review_rounds"].append(float(avg_rounds) if avg_rounds is not None else 0.0)
 
     return metrics
@@ -2452,6 +2444,38 @@ def _lead_time_band(hours: float) -> str:
     return "low"
 
 
+def _cfr_band(rate: float) -> str:
+    """Classify change failure rate per DORA research thresholds."""
+    if rate < 5.0:
+        return "elite"
+    if rate < 15.0:
+        return "high"
+    if rate < 45.0:
+        return "medium"
+    return "low"
+
+
+def _mttr_band(hours: float) -> str:
+    """Classify mean time to recovery per DORA benchmarks."""
+    if hours < 1.0:
+        return "elite"
+    if hours < 24.0:
+        return "high"
+    if hours < 168.0:  # 7 days
+        return "medium"
+    return "low"
+
+
+_BAND_ORDER = {"elite": 0, "high": 1, "medium": 2, "low": 3}
+_BAND_NAMES = ["elite", "high", "medium", "low"]
+
+
+def _overall_dora_band(*bands: str) -> str:
+    """Overall DORA rating = lowest (worst) of all metric bands."""
+    worst = max(_BAND_ORDER.get(b, 3) for b in bands)
+    return _BAND_NAMES[worst]
+
+
 async def get_dora_metrics(
     db: AsyncSession,
     date_from: datetime | None = None,
@@ -2467,12 +2491,19 @@ async def get_dora_metrics(
     if repo_id is not None:
         conditions.append(Deployment.repo_id == repo_id)
 
-    # Total deployments in period
+    # Total successful deployments in period
     total = await db.scalar(
         select(func.count()).select_from(
             select(Deployment.id).where(
                 *conditions, Deployment.status == "success"
             ).subquery()
+        )
+    ) or 0
+
+    # Total all deployments (success + failure) for CFR denominator
+    total_all = await db.scalar(
+        select(func.count()).select_from(
+            select(Deployment.id).where(*conditions).subquery()
         )
     ) or 0
 
@@ -2489,7 +2520,34 @@ async def get_dora_metrics(
     )
     avg_lead_time_hours = round(float(avg_lt) / 3600, 2) if avg_lt else None
 
-    # Recent deployments (last 20)
+    # Change Failure Rate
+    failure_count = await db.scalar(
+        select(func.count()).select_from(
+            select(Deployment.id).where(
+                *conditions, Deployment.is_failure.is_(True)
+            ).subquery()
+        )
+    ) or 0
+    cfr = round(failure_count / total_all * 100, 2) if total_all > 0 else None
+
+    # Mean Time to Recovery
+    avg_mttr = await db.scalar(
+        select(func.avg(Deployment.recovery_time_s)).where(
+            *conditions,
+            Deployment.is_failure.is_(True),
+            Deployment.recovery_time_s.isnot(None),
+        )
+    )
+    avg_mttr_hours = round(float(avg_mttr) / 3600, 2) if avg_mttr else None
+
+    # Band classifications
+    df_band = _deploy_frequency_band(deploy_frequency)
+    lt_band = _lead_time_band(avg_lead_time_hours) if avg_lead_time_hours is not None else "low"
+    cfr_band_val = _cfr_band(cfr) if cfr is not None else "low"
+    mttr_band_val = _mttr_band(avg_mttr_hours) if avg_mttr_hours is not None else "low"
+    overall = _overall_dora_band(df_band, lt_band, cfr_band_val, mttr_band_val)
+
+    # Recent deployments (last 20, all statuses)
     dep_rows = (
         await db.execute(
             select(
@@ -2501,9 +2559,12 @@ async def get_dora_metrics(
                 Deployment.status,
                 Deployment.lead_time_s,
                 Repository.full_name,
+                Deployment.is_failure,
+                Deployment.failure_detected_via,
+                Deployment.recovery_time_s,
             )
             .join(Repository, Deployment.repo_id == Repository.id)
-            .where(*conditions, Deployment.status == "success")
+            .where(*conditions)
             .order_by(Deployment.deployed_at.desc())
             .limit(20)
         )
@@ -2519,16 +2580,26 @@ async def get_dora_metrics(
             status=row[5],
             lead_time_hours=round(float(row[6]) / 3600, 2) if row[6] else None,
             repo_name=row[7],
+            is_failure=row[8],
+            failure_detected_via=row[9],
+            recovery_time_hours=round(float(row[10]) / 3600, 2) if row[10] else None,
         )
         for row in dep_rows
     ]
 
     return DORAMetricsResponse(
         deploy_frequency=deploy_frequency,
-        deploy_frequency_band=_deploy_frequency_band(deploy_frequency),
+        deploy_frequency_band=df_band,
         avg_lead_time_hours=avg_lead_time_hours,
-        lead_time_band=_lead_time_band(avg_lead_time_hours) if avg_lead_time_hours is not None else "low",
+        lead_time_band=lt_band,
         total_deployments=total,
+        total_all_deployments=total_all,
         period_days=period_days,
         deployments=deployments,
+        change_failure_rate=cfr,
+        cfr_band=cfr_band_val,
+        avg_mttr_hours=avg_mttr_hours,
+        mttr_band=mttr_band_val,
+        failure_deployments=failure_count,
+        overall_band=overall,
     )
