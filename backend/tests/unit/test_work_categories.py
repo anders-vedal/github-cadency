@@ -1,6 +1,8 @@
 """Unit tests for work category classification logic (pure function, no DB)."""
 
-from app.services.work_categories import classify_work_item_with_rules
+import pytest
+
+from app.services.work_categories import _validate_regex_safe, classify_work_item_with_rules
 
 
 class FakeRule:
@@ -168,3 +170,39 @@ def test_issue_type_case_sensitive():
     cat, src = classify_work_item_with_rules([], "title", rules, issue_type="bug")
     assert cat == "unknown"
     assert src == ""
+
+
+# --- ReDoS protection tests ---
+
+
+def test_validate_regex_safe_valid():
+    """Valid patterns pass without error."""
+    _validate_regex_safe(r"\bfix(?:es|ed)?\b")
+    _validate_regex_safe(r"feat|add")
+    _validate_regex_safe(r"[A-Z]+")
+
+
+def test_validate_regex_safe_invalid_syntax():
+    """Patterns that don't compile raise ValueError."""
+    with pytest.raises(ValueError, match="Invalid regex"):
+        _validate_regex_safe("[invalid")
+
+
+@pytest.mark.parametrize("pattern", [
+    r"(a+)+$",
+    r"(x*)*",
+    r"(a|b+)+",
+    r"(.*a)*",
+    r"([a-z]+)*",
+])
+def test_validate_regex_safe_nested_quantifiers(pattern):
+    """Patterns with nested quantifiers are rejected."""
+    with pytest.raises(ValueError, match="nested quantifiers"):
+        _validate_regex_safe(pattern)
+
+
+def test_validate_regex_safe_allows_non_nested():
+    """Single quantifiers inside groups are fine."""
+    _validate_regex_safe(r"(a+)")          # quantifier inside group, no outer quantifier
+    _validate_regex_safe(r"(foo|bar)+")    # alternation with outer quantifier, no inner quantifier
+    _validate_regex_safe(r"\d{2,4}")       # bounded quantifier

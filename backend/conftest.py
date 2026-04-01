@@ -8,7 +8,9 @@ import os
 
 # Set test env vars before importing app modules
 os.environ.setdefault("GITHUB_WEBHOOK_SECRET", "test-webhook-secret")
-os.environ.setdefault("JWT_SECRET", "test-jwt-secret-for-testing")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-for-testing-only!!")
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+os.environ.setdefault("ENCRYPTION_KEY", "HViiPG4E1XXNkvkcJGrWinBJiegO2KKYy5fuwUg1U-s=")
 
 import pytest_asyncio
 from datetime import datetime, timedelta, timezone

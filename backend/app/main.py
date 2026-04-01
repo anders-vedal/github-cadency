@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import select
 
 # Configure structured logging before any logger is created
@@ -16,9 +19,9 @@ configure_logging(
     json_output=settings.log_format == "json",
 )
 
-from app.api import ai_analysis, developers, goals, logs, oauth, relationships, roles, slack, stats, sync, teams, webhooks, work_categories  # noqa: E402
+from app.api import ai_analysis, developers, goals, logs, notifications, oauth, relationships, roles, slack, stats, sync, teams, webhooks, work_categories  # noqa: E402
 from app.models.database import AsyncSessionLocal  # noqa: E402
-from app.models.models import Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
+from app.models.models import NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
 from app.services.github_sync import run_sync  # noqa: E402
 
 logger = get_logger(__name__)
@@ -221,6 +224,33 @@ async def lifespan(app: FastAPI):
             id="full_sync",
             misfire_grace_time=None,  # Run even after restart
         )
+    # Notification evaluation scheduled job
+    from app.services.notifications import evaluate_all_alerts as _eval_alerts
+
+    async def scheduled_notification_evaluation() -> None:
+        async with AsyncSessionLocal() as db:
+            try:
+                await _eval_alerts(db)
+            except Exception as e:
+                logger.warning("Scheduled notification evaluation failed", error=str(e), event_type="system.notifications")
+
+    eval_interval = 15
+    try:
+        async with AsyncSessionLocal() as db:
+            nc = await db.get(NotificationConfig, 1)
+            if nc:
+                eval_interval = nc.evaluation_interval_minutes
+    except Exception:
+        pass
+
+    scheduler.add_job(
+        scheduled_notification_evaluation,
+        "interval",
+        minutes=eval_interval,
+        id="notification_evaluation",
+        misfire_grace_time=None,
+    )
+
     # Slack notification scheduled jobs — run hourly, check configured schedule at runtime
     from app.services.slack import scheduled_stale_pr_check, scheduled_weekly_digest
 
@@ -263,9 +293,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+from app.rate_limit import limiter  # noqa: E402 — must be after settings import
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Middleware is LIFO — last added = outermost.
 # LoggingContext added first so it's innermost (closest to route handlers).
 app.add_middleware(LoggingContextMiddleware)
+app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_url],
@@ -287,6 +324,7 @@ app.include_router(roles.router, prefix="/api", tags=["roles"])
 app.include_router(teams.router, prefix="/api", tags=["teams"])
 app.include_router(logs.router, prefix="/api", tags=["logs"])
 app.include_router(work_categories.router, prefix="/api", tags=["work-categories"])
+app.include_router(notifications.router, prefix="/api", tags=["notifications"])
 
 
 @app.get("/api/health")

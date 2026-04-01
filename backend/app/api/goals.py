@@ -71,14 +71,14 @@ async def progress(
     user: AuthUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await get_goal_progress(db, goal_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    # Developers can only see their own goals' progress
+    # Ownership check before executing service call
     if user.app_role != AppRole.admin:
         goal_obj = await db.get(DeveloperGoal, goal_id)
         if not goal_obj or goal_obj.developer_id != user.developer_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+            raise HTTPException(status_code=404, detail="Goal not found")
+    result = await get_goal_progress(db, goal_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Goal not found")
     return result
 
 

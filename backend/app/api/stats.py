@@ -395,7 +395,7 @@ async def recategorize_work_item(
     item_type: str,
     item_id: int,
     body: RecategorizeRequest,
-    _: AuthUser = Depends(get_current_user),
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     if item_type not in ("pr", "issue"):

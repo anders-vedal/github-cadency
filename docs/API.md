@@ -9,7 +9,7 @@ DevPulse uses GitHub OAuth for authentication. After login, all protected endpoi
 Authorization: Bearer {jwt_token}
 ```
 
-Every authenticated request checks `developers.is_active` in the database. Deactivated or deleted accounts receive `401 Unauthorized` immediately, even if the JWT is otherwise valid.
+Every authenticated request checks `developers.is_active` and `token_version` in the database. Deactivated or deleted accounts receive `401 Unauthorized` immediately, even if the JWT is otherwise valid. Tokens whose `token_version` does not match the database value are also rejected with `401` — this happens after role changes or deactivation, which increment the version and invalidate all existing JWTs for that user. Token lifetime is 4 hours.
 
 **Two roles:**
 - `admin` — full access to all endpoints
@@ -42,9 +42,27 @@ Every authenticated request checks `developers.is_active` in the database. Deact
 | **AI Analysis** (`/api/ai/*`) | Yes | No (403) |
 | **Slack config/test/history** (`/api/slack/config`, `/test`, `/notifications`) | Yes | No (403) |
 | **Slack user settings** (`/api/slack/user-settings`) | Own + any (admin) | Own only |
+| **Notifications** (`/api/notifications`, `/read`, `/dismiss`, `/config`, `/evaluate`) | Yes | No (403) |
 | **Log ingestion** (`/api/logs/ingest`) | Public | Public |
 
 Date parameters accept ISO 8601 format: `2026-01-01T00:00:00Z`. When `date_from`/`date_to` are omitted, defaults to the last 30 days.
+
+### Rate Limiting
+
+All endpoints are rate-limited by client IP (X-Forwarded-For–aware). Exceeding the limit returns `429 Too Many Requests`.
+
+| Endpoint | Limit |
+|----------|-------|
+| `POST /api/logs/ingest` | 10/minute |
+| `GET /api/auth/login` | 10/minute |
+| `GET /api/auth/callback` | 10/minute |
+| `POST /api/webhooks/github` | 60/minute |
+| `POST /api/sync/start` | 5/minute |
+| `POST /api/notifications/evaluate` | 5/minute |
+| `POST /api/work-categories/reclassify` | 2/minute |
+| All other routes | 120/minute |
+
+Rate limiting can be disabled via `RATE_LIMIT_ENABLED=false` environment variable.
 
 ---
 
@@ -66,11 +84,11 @@ Returns the GitHub OAuth authorization URL. The frontend should redirect the use
 OAuth callback. Exchanges the GitHub authorization code for an access token, fetches user profile, creates or updates the developer record, and issues a JWT.
 
 **Behavior:**
-- New user → creates developer record (`app_role: "developer"`, or `"admin"` if username matches `DEVPULSE_INITIAL_ADMIN`)
+- New user → creates developer record (`app_role: "developer"`, or `"admin"` if username matches `DEVPULSE_INITIAL_ADMIN` **and** no admin exists yet)
 - Existing user → updates `avatar_url`
 - Deactivated user → returns `403 Forbidden`
 
-**Response:** `302 Redirect` to `{FRONTEND_URL}/auth/callback?token={jwt}`
+**Response:** `302 Redirect` to `{FRONTEND_URL}/auth/callback#token={jwt}` (token in URL fragment, not query parameter)
 
 ### GET /api/auth/me
 
@@ -174,6 +192,8 @@ Partial update. Only provided fields are changed. **Admin only.**
 - `app_role`: `"admin"` or `"developer"` — promotes or demotes a user
 - `is_active`: `true` or `false` — activates or deactivates a developer
 
+Changing `app_role` or `is_active` increments `token_version`, which invalidates all existing JWTs for that developer (forcing re-authentication).
+
 **Response:** `200 OK` — `DeveloperResponse`
 
 ### GET /api/developers/{developer_id}/deactivation-impact
@@ -227,9 +247,9 @@ A developer with zero activity returns all zeros, null dates, and an empty `work
 
 ### DELETE /api/developers/{developer_id}
 
-Soft-delete: sets `is_active = false`. **Admin only.** Deactivated developers cannot log in via OAuth.
+Soft-delete: sets `is_active = false` and increments `token_version` (invalidating existing JWTs). **Admin only.** Deactivated developers cannot log in via OAuth.
 
-Mechanically identical to `PATCH { is_active: false }` — both set `is_active = false`. The convention is to use `PATCH` for standard deactivation (goes through `DeactivateDialog` with the impact check) and `DELETE` for removing junk/system accounts.
+Mechanically identical to `PATCH { is_active: false }` — both set `is_active = false` and increment `token_version`. The convention is to use `PATCH` for standard deactivation (goes through `DeactivateDialog` with the impact check) and `DELETE` for removing junk/system accounts.
 
 **Response:** `204 No Content`
 
@@ -2867,11 +2887,11 @@ Get global Slack configuration. **Admin only.**
 }
 ```
 
-Note: `bot_token` is never returned. `bot_token_configured` indicates whether a token has been set.
+Note: `bot_token` is never returned. `bot_token_configured` indicates whether a token has been set. The bot token is encrypted at rest using Fernet symmetric encryption (requires `ENCRYPTION_KEY` env var).
 
 ### PATCH /api/slack/config
 
-Update global Slack configuration. **Admin only.** All fields optional; only provided fields are updated.
+Update global Slack configuration. **Admin only.** All fields optional; only provided fields are updated. The `bot_token` is encrypted before storage using Fernet; the plaintext token is never persisted.
 
 **Request body:** Any subset of:
 ```json
@@ -2975,6 +2995,165 @@ Update the current user's Slack notification preferences. **Any authenticated us
 Get any developer's Slack notification preferences. **Admin only.**
 
 **Response:** `200 OK` — same shape as user-settings GET.
+
+---
+
+## Notification Center
+
+Unified in-app alert system with materialized notifications, read/dismiss tracking, and admin-configurable thresholds. All endpoints are **admin-only**.
+
+### GET /api/notifications
+
+List active (non-resolved) notifications with read/dismiss state for the current user.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `severity` | string | — | Filter by severity. **Validated:** must be `critical`, `warning`, or `info` (422 if invalid) |
+| `alert_type` | string | — | Filter by alert type. **Validated:** must be a key in `ALERT_TYPE_META` registry (422 if invalid) |
+| `include_dismissed` | bool | `false` | Include dismissed notifications |
+| `limit` | int | `50` | Max results |
+| `offset` | int | `0` | Pagination offset |
+
+**Response:** `200 OK`
+```json
+{
+  "notifications": [
+    {
+      "id": 1,
+      "alert_type": "stale_pr",
+      "severity": "critical",
+      "title": "PR #42 waiting 72h for review",
+      "body": "Fix authentication bug",
+      "entity_type": "pull_request",
+      "entity_id": 42,
+      "link_path": "https://github.com/org/repo/pull/42",
+      "developer_id": 5,
+      "metadata": {"age_hours": 72.3, "reason": "no_review"},
+      "is_read": false,
+      "is_dismissed": false,
+      "created_at": "2026-03-30T10:00:00Z",
+      "updated_at": "2026-03-31T10:00:00Z"
+    }
+  ],
+  "unread_count": 5,
+  "counts_by_severity": {"critical": 2, "warning": 2, "info": 1},
+  "total": 5
+}
+```
+
+Sorted by severity priority (critical → warning → info), then newest first.
+
+**Alert types (16):** `stale_pr`, `review_bottleneck`, `underutilized`, `uneven_assignment`, `merged_without_approval`, `revert_spike`, `high_risk_pr`, `bus_factor`, `team_silo`, `isolated_developer`, `declining_trend`, `issue_linkage`, `ai_budget`, `sync_failure`, `unassigned_roles`, `missing_config`.
+
+### POST /api/notifications/{id}/read
+
+Mark a notification as read. Idempotent.
+
+**Response:** `200 OK` — `{"success": true}`
+
+### POST /api/notifications/read-all
+
+Bulk mark all active unread notifications as read.
+
+**Response:** `200 OK` — `{"marked_read": 5}`
+
+### POST /api/notifications/{id}/dismiss
+
+Dismiss a specific notification instance.
+
+**Request body:**
+```json
+{
+  "dismiss_type": "permanent",
+  "duration_days": null
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dismiss_type` | `"permanent"` or `"temporary"` | Dismiss permanently or for a duration |
+| `duration_days` | int or null | Required for temporary. Sets `expires_at`. |
+
+**Response:** `200 OK` — `{"success": true, "expires_at": null}`
+
+### POST /api/notifications/dismiss-type
+
+Dismiss all notifications of an entire alert type. `alert_type` is validated against the `ALERT_TYPE_META` registry (422 if invalid).
+
+**Request body:**
+```json
+{
+  "alert_type": "underutilized",
+  "dismiss_type": "temporary",
+  "duration_days": 7
+}
+```
+
+**Response:** `200 OK` — `{"success": true, "alert_type": "underutilized", "expires_at": "2026-04-07T12:00:00Z"}`
+
+### DELETE /api/notifications/dismissals/{id}
+
+Undo a per-instance dismissal (only own dismissals).
+
+**Response:** `200 OK` — `{"success": true}`
+
+### DELETE /api/notifications/type-dismissals/{id}
+
+Undo a per-type dismissal (only own dismissals).
+
+**Response:** `200 OK` — `{"success": true}`
+
+### GET /api/notifications/config
+
+Get notification config (singleton). Includes `alert_types` metadata for the admin UI.
+
+**Response:** `200 OK`
+```json
+{
+  "alert_stale_pr_enabled": true,
+  "stale_pr_threshold_hours": 48,
+  "review_bottleneck_multiplier": 2.0,
+  "revert_spike_threshold_pct": 5.0,
+  "high_risk_pr_min_level": "high",
+  "issue_linkage_threshold_pct": 20.0,
+  "declining_trend_pr_drop_pct": 30.0,
+  "declining_trend_quality_drop_pct": 20.0,
+  "exclude_contribution_categories": ["system", "non_contributor"],
+  "evaluation_interval_minutes": 15,
+  "alert_types": [
+    {
+      "key": "stale_pr",
+      "label": "Stale Pull Requests",
+      "description": "PRs waiting too long for review...",
+      "enabled": true,
+      "thresholds": [{"field": "stale_pr_threshold_hours", "label": "Threshold", "value": 48, "unit": "hours", "min": 1, "max": 720}]
+    }
+  ],
+  "updated_at": "2026-03-31T12:00:00Z",
+  "updated_by": "admin"
+}
+```
+
+### PATCH /api/notifications/config
+
+Partial update notification config. All fields optional.
+
+**Request body:** Any subset of config fields (see GET response).
+
+**Response:** `200 OK` — updated config response.
+
+### POST /api/notifications/evaluate
+
+Trigger alert evaluation on demand.
+
+**Response:** `200 OK`
+```json
+{
+  "created": 3,
+  "updated": 1,
+  "resolved": 2
+}
+```
 
 ---
 

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import require_admin
 from app.models.database import get_db
+from app.rate_limit import limiter
 from app.models.models import Issue, PullRequest, Repository, SyncEvent, SyncScheduleConfig
 from app.config import validate_github_config
 from app.schemas.schemas import (
@@ -34,8 +35,10 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @router.post("/sync/start", status_code=202)
+@limiter.limit("5/minute")
 async def start_sync(
-    request: SyncTriggerRequest,
+    request: Request,
+    body: SyncTriggerRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
@@ -48,22 +51,22 @@ async def start_sync(
 
     # Create SyncEvent immediately so the frontend sees it on the next status poll
     sync_event = SyncEvent(
-        sync_type=request.sync_type,
+        sync_type=body.sync_type,
         status="started",
         started_at=datetime.now(timezone.utc),
         repos_synced=0,
         prs_upserted=0,
         issues_upserted=0,
         errors=[],
-        repo_ids=request.repo_ids,
-        since_override=request.since,
+        repo_ids=body.repo_ids,
+        since_override=body.since,
         repos_completed=[],
         repos_failed=[],
         log_summary=[],
         is_resumable=False,
         rate_limit_wait_s=0,
         triggered_by="manual",
-        sync_scope=request.sync_scope,
+        sync_scope=body.sync_scope,
     )
     db.add(sync_event)
     await db.commit()
@@ -71,12 +74,12 @@ async def start_sync(
 
     background_tasks.add_task(
         run_sync,
-        request.sync_type,
-        request.repo_ids,
-        request.since,
+        body.sync_type,
+        body.repo_ids,
+        body.since,
         None,  # resumed_from_id
         "manual",  # triggered_by
-        request.sync_scope,  # sync_scope
+        body.sync_scope,  # sync_scope
         sync_event.id,  # sync_event_id — use pre-created event
     )
     return SyncEventResponse.model_validate(sync_event)

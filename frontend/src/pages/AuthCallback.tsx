@@ -6,14 +6,27 @@ export default function AuthCallback() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    const token = searchParams.get('token')
+    // Check URL fragment first (secure token delivery)
+    const hash = window.location.hash
+    if (hash) {
+      const fragmentParams = new URLSearchParams(hash.substring(1))
+      const token = fragmentParams.get('token')
+      if (token) {
+        localStorage.setItem('devpulse_token', token)
+        // Clear the fragment from the URL to prevent referrer leaks
+        window.history.replaceState(null, '', window.location.pathname)
+        navigate('/', { replace: true })
+        return
+      }
+    }
+
+    // GitHub redirected here with an OAuth code — forward to backend for token exchange
     const code = searchParams.get('code')
-    if (token) {
-      localStorage.setItem('devpulse_token', token)
-      navigate('/', { replace: true })
-    } else if (code) {
-      // GitHub redirected here with an OAuth code — forward to backend for token exchange
-      window.location.href = `/api/auth/callback?code=${encodeURIComponent(code)}`
+    const state = searchParams.get('state')
+    if (code) {
+      const params = new URLSearchParams({ code })
+      if (state) params.set('state', state)
+      window.location.href = `/api/auth/callback?${params.toString()}`
     } else {
       navigate('/login', { replace: true })
     }

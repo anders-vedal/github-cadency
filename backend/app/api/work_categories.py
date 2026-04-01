@@ -1,10 +1,11 @@
 """API routes for configurable work categories and classification rules."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user, require_admin
 from app.models.database import get_db
+from app.rate_limit import limiter
 from app.schemas.schemas import (
     AuthUser,
     BulkCreateRulesRequest,
@@ -191,7 +192,9 @@ async def bulk_create_rules_endpoint(
 
 
 @router.post("/work-categories/reclassify", response_model=ReclassifyResponse)
+@limiter.limit("2/minute")
 async def reclassify_endpoint(
+    request: Request,
     _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):

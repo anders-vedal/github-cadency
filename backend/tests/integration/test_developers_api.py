@@ -140,3 +140,39 @@ class TestDeleteDeveloper:
     async def test_delete_not_found(self, client):
         resp = await client.delete("/api/developers/999")
         assert resp.status_code == 404
+
+
+class TestDeveloperSchemaValidation:
+    @pytest.mark.asyncio
+    async def test_display_name_255_accepted(self, client):
+        resp = await client.post("/api/developers", json={
+            "github_username": "longname",
+            "display_name": "A" * 255,
+        })
+        assert resp.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_display_name_too_long_rejected(self, client):
+        resp = await client.post("/api/developers", json={
+            "github_username": "toolong",
+            "display_name": "A" * 256,
+        })
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_notes_too_long_rejected(self, client):
+        resp = await client.post("/api/developers", json={
+            "github_username": "longnotes",
+            "display_name": "Test",
+            "notes": "x" * 5001,
+        })
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_skill_item_too_long_rejected(self, client):
+        resp = await client.post("/api/developers", json={
+            "github_username": "longskill",
+            "display_name": "Test",
+            "skills": ["x" * 101],
+        })
+        assert resp.status_code == 422

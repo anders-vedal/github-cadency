@@ -4,7 +4,7 @@
 Notification Center v2
 
 ## Status
-pending
+completed
 
 ## Blocked By
 - NC-03-api-endpoints

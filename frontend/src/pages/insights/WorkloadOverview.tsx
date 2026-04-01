@@ -22,7 +22,8 @@ import {
 } from '@/components/ui/table'
 import type { DeveloperWorkload } from '@/utils/types'
 
-import AlertStrip, { workloadStyles } from '@/components/AlertStrip'
+import AlertSummaryBar from '@/components/NotificationCenter/AlertSummaryBar'
+import { workloadStyles } from '@/components/AlertStrip'
 import SortableHead from '@/components/SortableHead'
 
 const workloadBarColors: Record<DeveloperWorkload['workload_score'], string> = {
@@ -151,7 +152,7 @@ export default function WorkloadOverview() {
       </div>
 
       {/* Alerts */}
-      {workload && <AlertStrip alerts={workload.alerts} />}
+      <AlertSummaryBar />
 
       {/* Stale PRs */}
       {stalePRs && stalePRs.stale_prs.length > 0 && (

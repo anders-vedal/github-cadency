@@ -2,7 +2,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # --- Enums ---
@@ -53,30 +53,48 @@ class AuthMeResponse(BaseModel):
 
 
 class DeveloperCreate(BaseModel):
-    github_username: str
-    display_name: str
-    email: str | None = None
-    role: str | None = None
+    github_username: str = Field(max_length=39)
+    display_name: str = Field(max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+    role: str | None = Field(default=None, max_length=200)
     skills: list[str] | None = None
-    specialty: str | None = None
-    location: str | None = None
-    timezone: str | None = None
-    team: str | None = None
-    office: str | None = None
-    notes: str | None = None
+    specialty: str | None = Field(default=None, max_length=200)
+    location: str | None = Field(default=None, max_length=200)
+    timezone: str | None = Field(default=None, max_length=100)
+    team: str | None = Field(default=None, max_length=200)
+    office: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("skills")
+    @classmethod
+    def validate_skills(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            for skill in v:
+                if len(skill) > 100:
+                    raise ValueError("Each skill must be at most 100 characters")
+        return v
 
 
 class DeveloperUpdate(BaseModel):
-    display_name: str | None = None
-    email: str | None = None
-    role: str | None = None
+    display_name: str | None = Field(default=None, max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+    role: str | None = Field(default=None, max_length=200)
     skills: list[str] | None = None
-    specialty: str | None = None
-    location: str | None = None
-    timezone: str | None = None
-    team: str | None = None
-    office: str | None = None
-    notes: str | None = None
+    specialty: str | None = Field(default=None, max_length=200)
+    location: str | None = Field(default=None, max_length=200)
+    timezone: str | None = Field(default=None, max_length=100)
+    team: str | None = Field(default=None, max_length=200)
+    office: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("skills")
+    @classmethod
+    def validate_skills(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            for skill in v:
+                if len(skill) > 100:
+                    raise ValueError("Each skill must be at most 100 characters")
+        return v
 
 
 class DeveloperUpdateAdmin(DeveloperUpdate):
@@ -99,6 +117,7 @@ class DeveloperResponse(BaseModel):
     team: str | None
     office: str | None
     app_role: str
+    token_version: int = 1
     is_active: bool
     avatar_url: str | None
     notes: str | None
@@ -188,10 +207,10 @@ class WorkCategoryResponse(BaseModel):
 
 
 class WorkCategoryCreate(BaseModel):
-    category_key: str
-    display_name: str
-    description: str | None = None
-    color: str
+    category_key: str = Field(max_length=100)
+    display_name: str = Field(max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    color: str = Field(max_length=20)
     exclude_from_stats: bool = False
 
 
@@ -216,11 +235,11 @@ class WorkCategoryRuleResponse(BaseModel):
 
 
 class WorkCategoryRuleCreate(BaseModel):
-    match_type: str
-    match_value: str
-    description: str | None = None
+    match_type: str = Field(max_length=50)
+    match_value: str = Field(max_length=1000)
+    description: str | None = Field(default=None, max_length=2000)
     case_sensitive: bool = False
-    category_key: str
+    category_key: str = Field(max_length=100)
     priority: int
 
 
@@ -727,8 +746,8 @@ class MetricKey(str, Enum):
 
 class GoalCreate(BaseModel):
     developer_id: int
-    title: str
-    description: str | None = None
+    title: str = Field(max_length=500)
+    description: str | None = Field(default=None, max_length=5000)
     metric_key: MetricKey
     target_value: float
     target_direction: Literal["above", "below"] = "above"
@@ -736,8 +755,8 @@ class GoalCreate(BaseModel):
 
 
 class GoalSelfCreate(BaseModel):
-    title: str
-    description: str | None = None
+    title: str = Field(max_length=500)
+    description: str | None = Field(default=None, max_length=5000)
     metric_key: MetricKey
     target_value: float
     target_direction: Literal["above", "below"] = "above"
@@ -818,7 +837,7 @@ class SyncTriggerRequest(BaseModel):
     sync_type: Literal["full", "incremental"] = "incremental"
     repo_ids: list[int] | None = None
     since: datetime | None = None
-    sync_scope: str | None = None
+    sync_scope: str | None = Field(default=None, max_length=500)
 
 
 class PreflightCheck(BaseModel):
@@ -1390,17 +1409,154 @@ class SlackTestResponse(BaseModel):
     message: str
 
 
+# --- Notification Center ---
+
+
+class AlertType(str, Enum):
+    stale_pr = "stale_pr"
+    review_bottleneck = "review_bottleneck"
+    underutilized = "underutilized"
+    uneven_assignment = "uneven_assignment"
+    merged_without_approval = "merged_without_approval"
+    revert_spike = "revert_spike"
+    high_risk_pr = "high_risk_pr"
+    bus_factor = "bus_factor"
+    team_silo = "team_silo"
+    isolated_developer = "isolated_developer"
+    declining_trend = "declining_trend"
+    issue_linkage = "issue_linkage"
+    ai_budget = "ai_budget"
+    sync_failure = "sync_failure"
+    unassigned_roles = "unassigned_roles"
+    missing_config = "missing_config"
+
+
+class NotificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    alert_type: str
+    severity: str
+    title: str
+    body: str | None = None
+    entity_type: str | None = None
+    entity_id: int | None = None
+    link_path: str | None = None
+    developer_id: int | None = None
+    metadata: dict | None = None
+    is_read: bool = False
+    is_dismissed: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationsListResponse(BaseModel):
+    notifications: list[NotificationResponse]
+    unread_count: int
+    counts_by_severity: dict[str, int]
+    total: int
+
+
+class DismissNotificationRequest(BaseModel):
+    dismiss_type: Literal["permanent", "temporary"] = "permanent"
+    duration_days: int | None = None
+
+
+class DismissAlertTypeRequest(BaseModel):
+    alert_type: str = Field(max_length=100)
+    dismiss_type: Literal["permanent", "temporary"] = "permanent"
+    duration_days: int | None = None
+
+
+class NotificationConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    alert_stale_pr_enabled: bool
+    alert_review_bottleneck_enabled: bool
+    alert_underutilized_enabled: bool
+    alert_uneven_assignment_enabled: bool
+    alert_merged_without_approval_enabled: bool
+    alert_revert_spike_enabled: bool
+    alert_high_risk_pr_enabled: bool
+    alert_bus_factor_enabled: bool
+    alert_declining_trends_enabled: bool
+    alert_issue_linkage_enabled: bool
+    alert_ai_budget_enabled: bool
+    alert_sync_failure_enabled: bool
+    alert_unassigned_roles_enabled: bool
+    alert_missing_config_enabled: bool
+    stale_pr_threshold_hours: int
+    review_bottleneck_multiplier: float
+    revert_spike_threshold_pct: float
+    high_risk_pr_min_level: str
+    issue_linkage_threshold_pct: float
+    declining_trend_pr_drop_pct: float
+    declining_trend_quality_drop_pct: float
+    exclude_contribution_categories: list[str] | None
+    evaluation_interval_minutes: int
+    alert_types: list[dict] = []
+    updated_at: datetime
+    updated_by: str | None = None
+
+
+class NotificationConfigUpdate(BaseModel):
+    alert_stale_pr_enabled: bool | None = None
+    alert_review_bottleneck_enabled: bool | None = None
+    alert_underutilized_enabled: bool | None = None
+    alert_uneven_assignment_enabled: bool | None = None
+    alert_merged_without_approval_enabled: bool | None = None
+    alert_revert_spike_enabled: bool | None = None
+    alert_high_risk_pr_enabled: bool | None = None
+    alert_bus_factor_enabled: bool | None = None
+    alert_declining_trends_enabled: bool | None = None
+    alert_issue_linkage_enabled: bool | None = None
+    alert_ai_budget_enabled: bool | None = None
+    alert_sync_failure_enabled: bool | None = None
+    alert_unassigned_roles_enabled: bool | None = None
+    alert_missing_config_enabled: bool | None = None
+    stale_pr_threshold_hours: int | None = None
+    review_bottleneck_multiplier: float | None = None
+    revert_spike_threshold_pct: float | None = None
+    high_risk_pr_min_level: str | None = None
+    issue_linkage_threshold_pct: float | None = None
+    declining_trend_pr_drop_pct: float | None = None
+    declining_trend_quality_drop_pct: float | None = None
+    exclude_contribution_categories: list[str] | None = None
+    evaluation_interval_minutes: int | None = None
+
+
+class EvaluationResultResponse(BaseModel):
+    created: int
+    updated: int
+    resolved: int
+
+
 # --- Frontend Log Ingestion ---
 
 
 class FrontendLogEntry(BaseModel):
     level: Literal["warn", "error"] = "error"
-    message: str
-    event_type: str = "frontend.error"
+    message: str = Field(max_length=4000)
+    event_type: str = Field(default="frontend.error", max_length=100)
     context: dict[str, Any] | None = None
-    timestamp: str | None = None
-    url: str | None = None
-    user_agent: str | None = None
+    timestamp: str | None = Field(default=None, max_length=50)
+    url: str | None = Field(default=None, max_length=2000)
+    user_agent: str | None = Field(default=None, max_length=500)
+
+    @field_validator("context")
+    @classmethod
+    def validate_context(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return v
+        if len(v) > 20:
+            raise ValueError("context must have at most 20 keys")
+        for key, val in v.items():
+            if len(key) > 50:
+                raise ValueError(f"context key too long: {key[:50]}...")
+            serialized = str(val)
+            if len(serialized) > 1000:
+                raise ValueError(f"context value too large for key: {key}")
+        return v
 
 
 class FrontendLogBatch(BaseModel):

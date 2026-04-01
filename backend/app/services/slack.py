@@ -2,12 +2,14 @@
 
 from datetime import datetime, timedelta, timezone
 
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.logging import get_logger
 from app.models.models import (
     Developer,
@@ -20,6 +22,38 @@ from app.models.models import (
 from app.schemas.schemas import SlackConfigUpdate, SlackUserSettingsUpdate
 
 logger = get_logger(__name__)
+
+
+# --- Token encryption helpers ---
+
+
+def _get_fernet() -> Fernet:
+    """Return a Fernet instance using the configured encryption key.
+
+    Raises ValueError if the key is missing or invalid.
+    """
+    if not settings.encryption_key:
+        raise ValueError(
+            "ENCRYPTION_KEY is required for Slack bot token encryption. "
+            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    try:
+        return Fernet(settings.encryption_key.encode())
+    except Exception as exc:
+        raise ValueError(f"Invalid ENCRYPTION_KEY (must be a valid Fernet key): {exc}") from exc
+
+
+def encrypt_token(plaintext: str) -> str:
+    """Encrypt a bot token for storage. Returns a Fernet ciphertext string."""
+    return _get_fernet().encrypt(plaintext.encode()).decode()
+
+
+def decrypt_token(ciphertext: str) -> str:
+    """Decrypt a stored bot token. Returns the plaintext token."""
+    try:
+        return _get_fernet().decrypt(ciphertext.encode()).decode()
+    except InvalidToken as exc:
+        raise ValueError("Failed to decrypt bot token — ENCRYPTION_KEY may have changed") from exc
 
 
 # --- Config CRUD ---
@@ -43,6 +77,8 @@ async def update_slack_config(
     row = await get_slack_config(db)
 
     for field, value in updates.model_dump(exclude_unset=True).items():
+        if field == "bot_token" and value:
+            value = encrypt_token(value)
         setattr(row, field, value)
 
     row.updated_at = datetime.now(timezone.utc)
@@ -50,6 +86,17 @@ async def update_slack_config(
     await db.commit()
     await db.refresh(row)
     return row
+
+
+def get_decrypted_bot_token(config: SlackConfig) -> str | None:
+    """Return the decrypted bot token, or None if not configured."""
+    if not config.bot_token:
+        return None
+    try:
+        return decrypt_token(config.bot_token)
+    except ValueError:
+        logger.error("Failed to decrypt Slack bot token", event_type="system.slack")
+        return None
 
 
 def build_config_response(config: SlackConfig) -> dict:
@@ -152,14 +199,20 @@ async def _log_notification(
 # --- Guard ---
 
 
-async def _check_slack_enabled(db: AsyncSession) -> SlackConfig:
-    """Verify Slack is enabled and has a bot token. Returns config or raises."""
+async def _check_slack_enabled(db: AsyncSession) -> tuple[SlackConfig, str]:
+    """Verify Slack is enabled and has a bot token.
+
+    Returns (config, decrypted_bot_token) or raises.
+    """
     config = await get_slack_config(db)
     if not config.slack_enabled:
         raise HTTPException(403, "Slack notifications are disabled.")
     if not config.bot_token:
         raise HTTPException(503, "Slack bot token is not configured.")
-    return config
+    token = get_decrypted_bot_token(config)
+    if not token:
+        raise HTTPException(503, "Slack bot token could not be decrypted.")
+    return config, token
 
 
 # --- Test connection ---
@@ -167,12 +220,12 @@ async def _check_slack_enabled(db: AsyncSession) -> SlackConfig:
 
 async def send_test_message(db: AsyncSession) -> dict:
     """Send a test message to the default channel (or DM to caller)."""
-    config = await _check_slack_enabled(db)
+    config, bot_token = await _check_slack_enabled(db)
     channel = config.default_channel
     if not channel:
         # Try auth.test to at least verify the token
         try:
-            client = _get_client(config.bot_token)
+            client = _get_client(bot_token)
             auth = await client.auth_test()
             return {"success": True, "message": f"Connected as {auth['user']} to {auth['team']}. No default channel set."}
         except SlackApiError as e:
@@ -180,7 +233,7 @@ async def send_test_message(db: AsyncSession) -> dict:
 
     try:
         await _send_message(
-            config.bot_token,
+            bot_token,
             channel,
             "DevPulse test notification — Slack integration is working.",
         )
@@ -217,7 +270,7 @@ async def get_notification_history(
 
 async def _send_dm_to_developer(
     db: AsyncSession,
-    config: SlackConfig,
+    bot_token: str,
     developer: Developer,
     notification_type: str,
     text: str,
@@ -242,7 +295,7 @@ async def _send_dm_to_developer(
         return False
 
     try:
-        await _send_message(config.bot_token, user_settings.slack_user_id, text, blocks)
+        await _send_message(bot_token, user_settings.slack_user_id, text, blocks)
         await _log_notification(
             db, notification_type, user_settings.slack_user_id, developer.id, "sent",
             payload={"text": text[:200]},
@@ -262,6 +315,9 @@ async def send_stale_pr_nudges(db: AsyncSession) -> int:
     """Daily job: find stale open PRs and DM their authors."""
     config = await get_slack_config(db)
     if not config.slack_enabled or not config.bot_token or not config.notify_stale_prs:
+        return 0
+    bot_token = get_decrypted_bot_token(config)
+    if not bot_token:
         return 0
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=config.stale_pr_days_threshold)
@@ -297,7 +353,7 @@ async def send_stale_pr_nudges(db: AsyncSession) -> int:
             pr_lines.append(f"• *#{pr.number}* {pr.title} ({days}d old)")
 
         text = f"You have {len(prs)} stale PR{'s' if len(prs) != 1 else ''} open for >{config.stale_pr_days_threshold} days:\n" + "\n".join(pr_lines)
-        if await _send_dm_to_developer(db, config, dev, "stale_pr", text):
+        if await _send_dm_to_developer(db, bot_token, dev, "stale_pr", text):
             sent += 1
 
     logger.info("Sent stale PR nudges", developers_notified=sent, stale_prs=len(stale_prs), event_type="system.slack")
@@ -310,6 +366,9 @@ async def send_high_risk_pr_alert(
     """Send alert for a high-risk PR to its author."""
     config = await get_slack_config(db)
     if not config.slack_enabled or not config.bot_token or not config.notify_high_risk_prs:
+        return False
+    bot_token = get_decrypted_bot_token(config)
+    if not bot_token:
         return False
     if risk_score < config.risk_score_threshold:
         return False
@@ -327,7 +386,7 @@ async def send_high_risk_pr_alert(
         f"Risk score: {risk_score:.0%} — "
         f"+{pr.additions or 0}/-{pr.deletions or 0} lines, {pr.changed_files or 0} files"
     )
-    return await _send_dm_to_developer(db, config, dev, "high_risk_pr", text)
+    return await _send_dm_to_developer(db, bot_token, dev, "high_risk_pr", text)
 
 
 async def send_workload_alert(
@@ -337,12 +396,15 @@ async def send_workload_alert(
     config = await get_slack_config(db)
     if not config.slack_enabled or not config.bot_token or not config.notify_workload_alerts:
         return False
+    bot_token = get_decrypted_bot_token(config)
+    if not bot_token:
+        return False
 
     text = (
         f"Your workload is now *{workload_level}* (score: {workload_score}).\n"
         f"Consider closing or delegating some open items."
     )
-    return await _send_dm_to_developer(db, config, developer, "workload", text)
+    return await _send_dm_to_developer(db, bot_token, developer, "workload", text)
 
 
 async def send_sync_notification(
@@ -351,6 +413,9 @@ async def send_sync_notification(
     """Send sync completion/failure notification to default channel."""
     config = await get_slack_config(db)
     if not config.slack_enabled or not config.bot_token:
+        return False
+    bot_token = get_decrypted_bot_token(config)
+    if not bot_token:
         return False
 
     is_failure = sync_event.status in ("failed", "completed_with_errors")
@@ -379,7 +444,7 @@ async def send_sync_notification(
         )
 
     try:
-        await _send_message(config.bot_token, channel, text)
+        await _send_message(bot_token, channel, text)
         await _log_notification(
             db, "sync_failure" if is_failure else "sync_complete",
             channel, None, "sent", payload={"text": text[:200]},
@@ -401,6 +466,9 @@ async def send_weekly_digest(db: AsyncSession) -> int:
 
     config = await get_slack_config(db)
     if not config.slack_enabled or not config.bot_token or not config.notify_weekly_digest:
+        return 0
+    bot_token = get_decrypted_bot_token(config)
+    if not bot_token:
         return 0
 
     now = datetime.now(timezone.utc)
@@ -431,7 +499,7 @@ async def send_weekly_digest(db: AsyncSession) -> int:
 
     sent = 0
     for dev in developers:
-        if await _send_dm_to_developer(db, config, dev, "weekly_digest", text):
+        if await _send_dm_to_developer(db, bot_token, dev, "weekly_digest", text):
             sent += 1
 
     logger.info("Sent weekly digest", developers_notified=sent, event_type="system.slack")

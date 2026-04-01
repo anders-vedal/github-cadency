@@ -1,6 +1,6 @@
 ---
 purpose: "High-level architecture, deployment topology, invariants, and component map"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/DATA-MODEL.md
   - docs/architecture/API-DESIGN.md
@@ -55,19 +55,19 @@ Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxy
 
 | Component | Docs |
 |-----------|------|
-| 27 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
-| 12 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
-| 16 services: sync, stats, collaboration, enhanced collaboration, relationships, roles, risk, goals, AI, work categorization, work categories, AI settings, Slack, teams, exceptions, utils | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
+| 32 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
+| 15 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
+| 16 services: sync, stats, collaboration, enhanced collaboration, relationships, roles, risk, goals, AI, work categorization, work categories, AI settings, Slack, notifications, exceptions, utils | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
 | React pages, hooks, state management, design system | [FRONTEND.md](FRONTEND.md) |
-| End-to-end flows: sync, webhooks, stats, AI, auth, goals | [DATA-FLOWS.md](DATA-FLOWS.md) |
+| End-to-end flows: sync, webhooks, stats, AI, auth, goals, notifications | [DATA-FLOWS.md](DATA-FLOWS.md) |
 
 ## Backend Structure
 
 ```
 backend/app/
-├── api/           # 12 routers (thin delegation to services)
-├── models/        # database.py (engine, sessions), models.py (27 ORM models)
-├── schemas/       # schemas.py (70+ Pydantic models, enums)
+├── api/           # 15 routers (thin delegation to services)
+├── models/        # database.py (engine, sessions), models.py (32 ORM models)
+├── schemas/       # schemas.py (80+ Pydantic models, enums)
 ├── services/      # 14 service modules (all business logic)
 ├── logging/       # structlog setup, request correlation middleware, get_logger()
 ├── config.py      # pydantic-settings (env vars)
@@ -87,10 +87,11 @@ frontend/src/
 
 ## Data Flow Summary
 
-1. **Sync**: Scheduled or API-triggered -> fetches repos/PRs/reviews/issues from GitHub -> upserts to PostgreSQL -> backfills author FKs
+1. **Sync**: Scheduled or API-triggered -> fetches repos/PRs/reviews/issues from GitHub -> upserts to PostgreSQL -> backfills author FKs -> triggers notification evaluation
 2. **Webhooks**: Real-time GitHub events -> HMAC verified -> upserted to DB
 3. **Stats**: On-demand computation from cached data -> returned as Pydantic models
 4. **AI**: Guard checks (toggle/budget/cooldown) -> gather data -> Claude API -> store result
+5. **Notifications**: Scheduled + post-sync evaluation -> 10 evaluators produce 16 alert types -> upsert with dedup -> auto-resolve stale
 
 See [DATA-FLOWS.md](DATA-FLOWS.md) for step-by-step traces with `file:function` references.
 
@@ -100,7 +101,7 @@ See [DATA-FLOWS.md](DATA-FLOWS.md) for step-by-step traces with `file:function` 
 |----------|------|-------------|
 | ~~High~~ | ~~AI~~ | ~~`ai_analysis.py` imports `get_benchmarks` but was renamed to `get_benchmarks_v2`~~ — **Fixed**: Updated imports to `get_benchmarks_v2` |
 | ~~High~~ | ~~Migrations~~ | ~~No initial migration~~ — **Fixed**: `000_initial_schema.py` added |
-| ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access for up to 7 days~~ — **Fixed**: `get_current_user()` checks `developers.is_active` on every request |
+| ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access for up to 7 days~~ — **Fixed**: `get_current_user()` checks `developers.is_active` + `token_version` on every request. Token lifetime reduced to 4 hours. Role changes and deactivation increment `token_version`, immediately invalidating existing JWTs. |
 | Medium | Sync | Auto-reactivation in sync can undo manual deactivation if the developer appears in GitHub activity or org members (warning log only) |
 | Medium | Sync | `scheduled_sync()` calls `await run_sync(...)` directly, blocking other APScheduler jobs (Slack checks) for the duration of the sync |
 | ~~Medium~~ | ~~Sync~~ | ~~TOCTOU race on sync start -- three optimistic reads without DB-level locking~~ — **Fixed**: PostgreSQL advisory lock wraps check+insert |

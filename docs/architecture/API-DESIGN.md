@@ -1,6 +1,6 @@
 ---
 purpose: "Auth model, route patterns, schema conventions, error handling"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -19,20 +19,21 @@ For the complete endpoint catalog, see [docs/API.md](../API.md).
 2. User authorizes on GitHub, redirected to frontend `/auth/callback?code=...`
 3. Frontend relays code to `GET /api/auth/callback?code=...`
 4. Backend exchanges code for token, fetches GitHub user, upserts Developer, creates JWT
-5. Returns `302` redirect to frontend with JWT in query string
+5. Returns `302` redirect to frontend with JWT in URL fragment (`#token=`)
 
 ### JWT
 
 - Algorithm: HS256, signed with `jwt_secret` env var
-- Expiry: 7 days
-- Payload: `{developer_id, github_username, app_role, exp}`
+- Expiry: 4 hours (`TOKEN_EXPIRY_HOURS` in `auth.py`)
+- Payload: `{developer_id, github_username, app_role, token_version, exp}`
 - Storage: frontend `localStorage` key `devpulse_token`
+- Revocation: `token_version` in payload must match `developers.token_version` in DB. Incremented on role change, deactivation, or soft-delete — immediately invalidates all existing JWTs for that user.
 
 ### Auth Dependencies (`backend/app/api/auth.py`)
 
 | Dependency | Returns | Usage |
 |------------|---------|-------|
-| `get_current_user` | `AuthUser` | Decodes JWT + checks `developers.is_active` via DB; 401 if invalid, expired, deactivated, or deleted |
+| `get_current_user` | `AuthUser` | Decodes JWT + checks `developers.is_active` and `token_version` via DB; 401 if invalid, expired, deactivated, deleted, or token_version mismatch |
 | `require_admin` | `AuthUser` | Admin only; 403 if `app_role != "admin"` |
 
 ### Auth Patterns by Router
@@ -51,6 +52,7 @@ For the complete endpoint catalog, see [docs/API.md](../API.md).
 | `roles.py` | Per-endpoint (`GET /roles`: `get_current_user`; POST/PATCH/DELETE: `require_admin`) |
 | `work_categories.py` | Per-endpoint (`GET /work-categories`, `GET /work-categories/rules`: `get_current_user`; all mutation endpoints including `POST /work-categories/suggestions`, `POST /work-categories/rules/bulk`: `require_admin`) |
 | `teams.py` | Per-endpoint (`GET /teams`: `get_current_user`; POST/PATCH/DELETE: `require_admin`) |
+| `notifications.py` | All endpoints `require_admin` + `get_current_user` for per-user read/dismiss state |
 | `logs.py` | No auth (public endpoint — frontend errors can occur before/during auth) |
 
 ## Route Organization
@@ -73,6 +75,7 @@ All routers registered under `/api` prefix:
 | `roles` | `/api/roles/*` | roles |
 | `work_categories` | `/api/work-categories/*` | work-categories |
 | `teams` | `/api/teams/*` | teams |
+| `notifications` | `/api/notifications/*` | notifications |
 | `logs` | `/api/logs/*` | logs |
 
 Plus standalone `GET /api/health` (no auth) in `main.py`.
@@ -153,4 +156,6 @@ Routers perform `db.get(Model, id)` before delegating to services for endpoints 
 | Low | Consistency | `GET /ai/history` uses manual column iteration for Pydantic construction; `GET /ai/history/{id}` and POST endpoints use `model_validate` |
 | Low | Consistency | Positional vs keyword args for `HTTPException` across routers |
 | Low | Auth | `GET /stats/repo/{repo_id}` and `GET /stats/repos/summary` use `get_current_user` not `require_admin` -- any user can read repo stats |
+| Low | Consistency | `DELETE /notifications/dismissals/{id}` and `DELETE /notifications/type-dismissals/{id}` return `{"success": true}` even if the dismissal_id doesn't exist — silent no-op, no 404 |
+| Low | Unused import | `notifications.py` imports `HTTPException` but never raises it — all error handling is in the service layer |
 | Low | Efficiency | `PATCH /ai/settings` and `PATCH /slack/config` both trigger `get_current_user` twice (router-level + endpoint-level) — double DB round-trip per request |

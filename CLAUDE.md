@@ -19,6 +19,7 @@ DevPulse — an engineering intelligence dashboard that tracks developer activit
 - **Frontend:** React 19, TypeScript, Vite, Tailwind CSS v4, shadcn/ui (base-nova style), TanStack Query v5, Recharts 3, pnpm
 - **GitHub integration:** REST API via httpx, GitHub App auth (JWT + installation tokens)
 - **AI:** Anthropic Claude API (claude-sonnet-4-0), on-demand only
+- **Rate limiting:** slowapi (IP-based, X-Forwarded-For–aware, configurable via `RATE_LIMIT_ENABLED`)
 - **Scheduling:** APScheduler AsyncIOScheduler (in-process, configured in FastAPI lifespan)
 - **Testing:** pytest + pytest-asyncio (backend), aiosqlite for in-memory test DB
 
@@ -48,6 +49,7 @@ backend/app/
 │   ├── webhooks.py              # GitHub webhook receiver (HMAC-verified)
 │   ├── ai_analysis.py           # AI analysis + 1:1 prep + team health
 │   ├── slack.py                 # Slack integration config, user settings, test, notification history
+│   ├── notifications.py         # Notification center: list, read, dismiss, config, evaluate (admin-only)
 │   └── logs.py                  # Frontend log ingestion (POST /logs/ingest, no auth)
 ├── models/
 │   ├── database.py   # Async engine, session factory, Base, get_db()
@@ -67,13 +69,15 @@ backend/app/
 │   ├── work_categories.py # Configurable work categories: CRUD, classification rules, reclassify, GitHub data suggestions scan, bulk rule create
 │   ├── work_category.py  # Work allocation: aggregation, drill-down, recategorization, AI batch
 │   ├── ai_settings.py    # AI feature toggles, budget, pricing, cooldown, usage tracking
-│   └── slack.py          # Slack notifications: config CRUD, DM/channel sending, scheduled jobs
+│   ├── slack.py          # Slack notifications: config CRUD, DM/channel sending, scheduled jobs
+│   └── notifications.py  # Notification center: alert evaluation, materialization, read/dismiss, config CRUD
 ├── logging/
 │   ├── __init__.py   # Public API: configure_logging, get_logger, LoggingContextMiddleware
 │   ├── config.py     # structlog setup: processor pipeline, JSON/console output
 │   └── middleware.py  # Request context middleware: request_id, method, path, duration
 ├── config.py         # pydantic-settings: all env vars (see also .env.example)
-└── main.py           # FastAPI app factory, CORS, router registration, APScheduler
+├── rate_limit.py     # slowapi Limiter instance, X-Forwarded-For–aware key function, default 120/min
+└── main.py           # FastAPI app factory, CORS, rate limiting, router registration, APScheduler
 ```
 
 ### Frontend Layout
@@ -83,7 +87,7 @@ frontend/src/
 ├── pages/            # Route components (Dashboard, TeamRegistry, DeveloperDetail, Repos, etc.)
 │   ├── insights/     # Insights sub-pages (Workload, Collaboration, Benchmarks, IssueQuality, IssueLinkage, OrgChart, etc.)
 │   ├── sync/         # Sync wizard, progress, history, detail (SyncPage, SyncWizard, SyncDetailPage, SyncProgressView, etc.)
-│   └── settings/     # Settings pages (AISettings, SlackSettings)
+│   └── settings/     # Settings pages (AISettings, SlackSettings, NotificationSettings)
 ├── components/
 │   ├── Layout.tsx    # Sticky header, top nav (Dashboard, Executive, Team, Insights, Goals, Admin dropdown), date range picker
 │   ├── SidebarLayout.tsx # Sidebar navigation for section groups (Insights, Admin)
@@ -95,21 +99,22 @@ frontend/src/
 │   ├── RelationshipsCard.tsx  # Relationship display/edit (reports_to, tech_lead, team_lead) on DeveloperDetail
 │   ├── WorksWithSection.tsx   # Top collaborators with multi-signal score breakdown on DeveloperDetail
 │   ├── SlackPreferencesSection.tsx  # Per-user Slack notification preferences on DeveloperDetail
+│   ├── NotificationCenter/  # NotificationBell (header icon + badge), NotificationPanel (dropdown list), AlertSummaryBar (compact dashboard bar)
 │   ├── ai/           # AI result renderers (AnalysisResultRenderer, OneOnOnePrepView, etc.)
 │   ├── charts/       # TrendChart, PercentileBar, ReviewQualityDonut, GoalSparkline, DeploymentTimeline
 │   └── ui/           # shadcn/ui primitives
-├── hooks/            # TanStack Query hooks (useAuth, useDevelopers, useStats, useSync, useAI, useAISettings, useGoals, useDateRange, useRelationships, useRoles, useSlack)
+├── hooks/            # TanStack Query hooks (useAuth, useDevelopers, useStats, useSync, useAI, useAISettings, useGoals, useDateRange, useRelationships, useRoles, useSlack, useNotifications)
 ├── utils/            # api.ts (apiFetch wrapper + ApiError class), types.ts (TS interfaces), categoryConfig.ts (CATEGORY_CONFIG/CATEGORY_ORDER), format.ts (timeAgo, formatDuration, formatDate shared utilities), logger.ts (structured frontend logger with batching + backend ingestion)
 └── lib/utils.ts      # cn() utility (clsx + tailwind-merge)
 ```
 
 **Import alias:** `@/` maps to `src/` (configured in vite.config.ts and tsconfig).
 
-## Database Schema (24 tables)
+## Database Schema (29 tables)
 
 | Table | Purpose |
 |-------|---------|
-| `developers` | Team registry with GitHub username, role, team, skills, app_role |
+| `developers` | Team registry with GitHub username, role, team, skills, app_role, token_version (for JWT revocation) |
 | `repositories` | GitHub repos with tracking toggle, default branch, tree truncation flag |
 | `pull_requests` | PRs with pre-computed cycle times, approval tracking, issue linkage, head_sha, author_github_username for backfill, work_category_source for classification provenance |
 | `pr_reviews` | Reviews with quality tier classification, reviewer_github_username for backfill |
@@ -135,6 +140,11 @@ frontend/src/
 | `role_definitions` | Admin-configurable role definitions: role_key (PK), display_name, contribution_category, display_order, is_default. 13 default roles seeded. |
 | `work_categories` | Admin-configurable work category definitions: category_key (PK), display_name, description, color, exclude_from_stats, display_order, is_default. 5 defaults seeded (feature, bugfix, tech_debt, ops, unknown) with descriptions. |
 | `work_category_rules` | Admin-configurable classification rules: match_type (label/title_regex/prefix/issue_type), match_value, description, case_sensitive, category_key FK, priority. 31 default rules seeded. |
+| `notifications` | Materialized in-app alerts with dedup (`alert_key` UNIQUE), severity, lifecycle (`resolved_at`), entity linking, metadata JSONB. 16 alert types. |
+| `notification_reads` | Per-user read tracking: `(notification_id, user_id)` unique pair with `read_at` timestamp |
+| `notification_dismissals` | Per-instance dismiss with optional expiry: `dismiss_type` (permanent/temporary), `expires_at` |
+| `notification_type_dismissals` | Dismiss entire alert type per user: `(alert_type, user_id)` unique, with optional `expires_at` |
+| `notification_config` | Singleton (id=1) admin-configurable alert thresholds, per-type enable toggles, contribution category exclusion, evaluation interval |
 
 **Key design decisions:**
 - Author/reviewer FKs are **nullable** — but `resolve_author()` auto-creates developers from embedded GitHub user data during sync. Raw usernames stored in `author_github_username`/`reviewer_github_username`/`assignee_github_username` columns for efficient backfill. `resolve_author()` also auto-reactivates inactive developers found in GitHub activity (flush + warning log).
@@ -229,7 +239,7 @@ python -m pytest tests/unit/        # unit tests only
 ## Key Patterns and Conventions
 
 ### Backend
-- **Auth:** GitHub OAuth → JWT (7-day expiry). Roles: `admin` (full access), `developer` (own data only). `get_current_user()` decodes JWT + queries `developers.is_active` (rejects deactivated/deleted users with 401) → `AuthUser`, `require_admin()` → 403. Per-endpoint injection for mixed-access routers.
+- **Auth:** GitHub OAuth → JWT (4-hour expiry). Roles: `admin` (full access), `developer` (own data only). `get_current_user()` decodes JWT + queries `developers.is_active` and `token_version` (rejects deactivated/deleted users and revoked tokens with 401) → `AuthUser`, `require_admin()` → 403. Per-endpoint injection for mixed-access routers. `token_version` column on `developers` is incremented on role change or deactivation, invalidating existing JWTs.
 - **Thin API routes:** Validate input, delegate to service functions — no business logic in routes
 - **Service functions:** All async, accept `AsyncSession` as first param
 - **Upsert pattern:** SELECT by unique key → create if not found → always overwrite mutable fields
@@ -269,10 +279,14 @@ python -m pytest tests/unit/        # unit tests only
 - **Benchmarks v2 (role-based peer groups):** `GET /stats/benchmarks?group=ics&team=platform` returns `BenchmarksV2Response` with per-developer metric values, percentile bands, and optional team comparison. Single API call replaces the old N+1 pattern. `_compute_per_developer_metrics()` accepts `requested_metrics` to only run needed batch queries (9 base + 6 extended: review_quality_score, changes_requested_rate, blocker_catch_rate, issues_closed, prs_merged_bugfix, issue_linkage_rate). Groups are admin-configurable via `GET/PATCH /stats/benchmark-groups`. `BENCHMARK_METRICS` dict is the canonical registry of all 15 benchmark metrics. Team comparison computes per-team medians when >=2 teams meet `min_team_size`. `GET /developers/unassigned-role-count` powers the nav badge for devs with no role set.
 - **Benchmarks API:** `GET /stats/benchmark-groups` (admin, list groups), `PATCH /stats/benchmark-groups/{group_key}` (admin, update roles/metrics/min_team_size), `GET /stats/benchmarks?group=&team=` (admin, v2 response), `GET /developers/unassigned-role-count` (any user).
 - **Roles API:** `GET /roles` (any user, list all role definitions), `POST /roles` (admin, create custom role), `PATCH /roles/{role_key}` (admin, update display_name/contribution_category/display_order), `DELETE /roles/{role_key}` (admin, only non-default roles with no assigned developers). Role validation on `POST/PATCH /developers` checks against `role_definitions` table.
-- **Work Categories API:** `GET /work-categories` (any user), `POST /work-categories` (admin), `PATCH /work-categories/{key}` (admin), `DELETE /work-categories/{key}` (admin, non-default only, no assigned items). `GET /work-categories/rules` (any user), `POST /work-categories/rules` (admin, validates regex), `PATCH /work-categories/rules/{id}` (admin), `DELETE /work-categories/rules/{id}` (admin). `POST /work-categories/rules/bulk` (admin, creates multiple rules in one transaction). `POST /work-categories/reclassify` (admin, batch reclassifies all non-manual items using current rules). `POST /work-categories/suggestions` (admin, scans synced PR/issue data for uncovered labels and issue types, returns suggestions with usage counts and keyword-based category hints).
-- **Slack integration:** Manual bot token setup (admin pastes xoxb- token). `slack_config` singleton for global settings, `slack_user_settings` for per-developer DM preferences (Slack user ID + notification toggles). 6 notification types: stale_pr, high_risk_pr, workload, sync_complete, sync_failure, weekly_digest. DMs sent to individual developers via `slack_sdk` `AsyncWebClient`. Scheduled jobs run hourly and check configured hour at runtime. Post-sync hook sends sync notifications. `notification_log` tracks all sent messages.
+- **Input validation:** Pydantic schemas enforce `Field(max_length=...)` on all user-facing string fields (e.g., `display_name=255`, `email=320`, `notes=5000`, `title=500`). `DeveloperCreate`/`DeveloperUpdate` share identical limits; `skills` items validated at 100 chars each via `field_validator`. Admin-supplied `title_regex` rules are checked for nested quantifiers (ReDoS protection) via `_validate_regex_safe()` in `work_categories.py` — patterns like `(a+)+$` are rejected at creation time. `GET /notifications` validates `severity` against `{"critical", "warning", "info"}` and `alert_type` against `ALERT_TYPE_META` registry keys. `POST /notifications/dismiss-type` also validates `alert_type`.
+- **Work Categories API:** `GET /work-categories` (any user), `POST /work-categories` (admin), `PATCH /work-categories/{key}` (admin), `DELETE /work-categories/{key}` (admin, non-default only, no assigned items). `GET /work-categories/rules` (any user), `POST /work-categories/rules` (admin, validates regex + ReDoS check), `PATCH /work-categories/rules/{id}` (admin), `DELETE /work-categories/rules/{id}` (admin). `POST /work-categories/rules/bulk` (admin, creates multiple rules in one transaction). `POST /work-categories/reclassify` (admin, batch reclassifies all non-manual items using current rules). `POST /work-categories/suggestions` (admin, scans synced PR/issue data for uncovered labels and issue types, returns suggestions with usage counts and keyword-based category hints).
+- **Slack integration:** Manual bot token setup (admin pastes xoxb- token). Bot token encrypted at rest using Fernet symmetric encryption (`ENCRYPTION_KEY` env var required). `encrypt_token()`/`decrypt_token()` in `services/slack.py`; `get_decrypted_bot_token()` handles decrypt failures gracefully. `slack_config` singleton for global settings, `slack_user_settings` for per-developer DM preferences (Slack user ID + notification toggles). 6 notification types: stale_pr, high_risk_pr, workload, sync_complete, sync_failure, weekly_digest. DMs sent to individual developers via `slack_sdk` `AsyncWebClient`. Scheduled jobs run hourly and check configured hour at runtime. Post-sync hook sends sync notifications. `notification_log` tracks all sent messages.
 - **Slack API:** `GET/PATCH /slack/config` (admin), `POST /slack/test` (admin), `GET /slack/notifications` (admin), `GET/PATCH /slack/user-settings` (any user), `GET /slack/user-settings/{id}` (admin).
 - **Log ingestion API:** `POST /logs/ingest` (public, no auth). Receives batched frontend error logs. Max 50 entries per request. Each entry emitted via structlog with `source="frontend"` and `event_type="frontend.error"`.
+- **Rate limiting:** slowapi with IP-based throttling (X-Forwarded-For–aware). Default 120/minute on all routes. Tiered overrides: `/logs/ingest` 10/min, `/auth/login` + `/auth/callback` 10/min, `/webhooks/github` 60/min, `/sync/start` 5/min, `/notifications/evaluate` 5/min, `/work-categories/reclassify` 2/min. Limiter instance in `app/rate_limit.py`, registered on `app.state.limiter` in `main.py`. `SlowAPIMiddleware` added as outermost middleware (after CORS). Disabled via `RATE_LIMIT_ENABLED=false` (used in tests). Rate-limited endpoints require `request: Request` as first parameter. Uses in-memory storage (single-instance); Redis backend documented in `.env.example` for multi-instance.
+- **Notification center:** Materialized alert system replacing unbounded AlertStrip stacking. `notifications` table stores alerts with `alert_key` dedup (UNIQUE), severity lifecycle (`resolved_at`), and entity linking. 16 alert types across 10 evaluators: stale PRs, workload (review bottleneck, underutilized, uneven assignment, merged without approval), revert spike, high-risk PRs, collaboration (bus factor, team silos, isolated developers), declining trends, issue linkage, AI budget, sync failures, config checks. `NotificationConfig` singleton (id=1) stores per-type enable toggles + configurable thresholds + `exclude_contribution_categories` JSONB (default: `["system", "non_contributor"]`). `ALERT_TYPE_META` registry in `notifications.py` drives the admin UI with labels, descriptions, and threshold metadata. Evaluation runs post-sync (non-blocking hook in `github_sync.py`) + scheduled every 15 minutes (configurable) + on-demand via `POST /notifications/evaluate`. Auto-resolution: `_auto_resolve_stale()` sets `resolved_at` on notifications whose conditions cleared. Per-user read tracking via `notification_reads` (separate from dismiss). Per-instance dismiss via `notification_dismissals` (permanent or temporary with `expires_at`). Per-type dismiss via `notification_type_dismissals`. Expired temporary dismissals ignored at query time.
+- **Notification API:** `GET /notifications` (admin, with severity/alert_type/include_dismissed filters, pagination), `POST /notifications/{id}/read` (admin), `POST /notifications/read-all` (admin), `POST /notifications/{id}/dismiss` (admin, body: `{dismiss_type, duration_days?}`), `POST /notifications/dismiss-type` (admin, body: `{alert_type, dismiss_type, duration_days?}`), `DELETE /notifications/dismissals/{id}` (admin), `DELETE /notifications/type-dismissals/{id}` (admin), `GET/PATCH /notifications/config` (admin), `POST /notifications/evaluate` (admin).
 
 ### Frontend
 - **Global date range:** `DateRangeContext` set in Layout header, consumed by all pages
@@ -286,7 +300,7 @@ python -m pytest tests/unit/        # unit tests only
 - **Error/loading:** `ErrorCard` + per-section `ErrorBoundary` for errors (each top-level page and sidebar section wrapped individually, global boundary as fallback). `StatCardSkeleton` + `TableSkeleton` for loading.
 - **Code splitting:** All page components lazy-loaded via `React.lazy()` with `Suspense` fallback (`PageSkeleton`). Layout, SidebarLayout, and shared hooks eagerly loaded.
 - **AI result rendering:** `AnalysisResultRenderer` switches on `analysis_type` → structured view. Colors: green (positive), amber (attention), red (concern).
-- **Nav structure:** Top nav has 4 links + Admin dropdown. Insights (`/insights/*`) and Admin (`/admin/*`) sections render with `SidebarLayout` (sticky left sidebar + content). Admin group: Team (`/admin/team`), Repos (`/admin/repos`), Sync (`/admin/sync`), AI Analysis (`/admin/ai`), AI Settings (`/admin/ai/settings`), Slack (`/admin/slack`). `isNavActive()` uses prefix matching for section links. Bare section URLs redirect to first sub-page. `/team` redirects to `/admin/team`; `/team/:id` (developer detail) remains top-level.
+- **Nav structure:** Top nav has 4 links + Admin dropdown. Insights (`/insights/*`) and Admin (`/admin/*`) sections render with `SidebarLayout` (sticky left sidebar + content). Admin group: Team (`/admin/team`), Repos (`/admin/repos`), Sync (`/admin/sync`), AI Analysis (`/admin/ai`), AI Settings (`/admin/ai/settings`), Slack (`/admin/slack`), Work Categories (`/admin/work-categories`), Notifications (`/admin/notifications`). `isNavActive()` uses prefix matching for section links. Bare section URLs redirect to first sub-page. `/team` redirects to `/admin/team`; `/team/:id` (developer detail) remains top-level.
 - **Contributor sync progress:** Team Registry page polls `useSyncStatus()` and shows a progress banner when `sync_type === "contributors"` is active. Completion banner (success/failure) fades after 10s via `useRef` transition detection. Developer list auto-refreshes on sync completion. Button disabled when any sync is active.
 - **Developer deactivation UI:** Team Registry has Active/Inactive toggle tabs. Active tab: Edit + Deactivate buttons per row. Deactivate opens `DeactivateDialog` which fetches `GET /developers/{id}/deactivation-impact` to show open PRs, issues, and branches before confirming. Inactive tab: dimmed rows with Reactivate button. Creating a developer with an inactive username triggers structured 409 caught via `ApiError` with reactivation prompt. `DeveloperDetail` shows "Inactive" badge when `is_active=false`.
 - **Activity summary on DeveloperDetail:** `ActivitySummaryCard` renders below the profile card (visible to own profile or admin). Shows lifetime PRs authored/merged/open, reviews given, issues created/assigned, repos touched, active since / last active dates, and a stacked color bar of work category breakdown (feature/bugfix/tech_debt/ops/unknown) with tooltips and legend. Uses `useActivitySummary` hook (60s staleTime).
@@ -312,6 +326,9 @@ python -m pytest tests/unit/        # unit tests only
 - **Repos page v2:** `/admin/repos` — portfolio-level repo management with summary strip (4x `StatCard`: tracked/untracked/never-synced counts + org-wide avg merge time with trend), search + filter bar (text search, language, status, health), sortable table (6 columns: Repository, Language, PRs, Avg Merge Time, Health, Tracked) and card grid view toggle. Health indicators (green/yellow/red/gray) computed frontend-side from `useReposSummary()` batch data: critical (>48h merge or zero PRs), attention (>24h merge or >14d stale), healthy, unknown (untracked). Trend arrows on PR count and merge time columns compare current vs previous period. Expandable row shows detailed stats via `useRepoStats()` plus deep-link buttons to DORA, CI, and Code Churn insight pages (`?repo_id=`). Health filter disabled during summary load to prevent flash of empty results. `useReposSummary` hook with 60s staleTime.
 - **Investment v2 drill-down:** `/insights/investment` — clickable donut segments + legend items set `selectedCategory` state, showing inline 5-item preview via `useWorkAllocationItems`. "View all" links to `/insights/investment/:category` — `InvestmentCategory` page with paginated table, type filter (PR/Issue/All), category source badges, and per-row recategorization dropdown. Custom chart tooltips (`ChartTooltip`, `TrendTooltip`) replace default Recharts tooltips. Larger donuts (280px, 70/100 radii). Selected segment dims others (opacity 0.3) + ring highlight.
 - **Insight page deep linking:** DORA (`/insights/dora`), CI (`/insights/ci`), and Code Churn (`/insights/code-churn`) pages accept `?repo_id=` URL parameter to pre-select a repo via `useSearchParams`. CodeChurn validates URL-sourced `repo_id` against tracked list on load.
+- **Notification center bell:** `NotificationBell` in Layout header (admin only). Red badge with unread count. Click opens `NotificationPanel` dropdown (380px, max-height 400px, scrollable). Severity filter tabs (All/Critical/Warning/Info with counts). Notifications grouped by severity when "All" selected (critical expanded by default). Each item: severity dot, title, body preview, relative time, alert type badge, dismiss menu, link arrow. Clicking navigates to `link_path` and marks read. `DismissMenu`: dismiss instance (permanent/7d/30d) or mute entire alert type (permanent/7d). Footer links to Notification Settings page. Empty state: green checkmark "All clear".
+- **Alert summary bar:** `AlertSummaryBar` replaces `AlertStrip` on Dashboard and Workload pages. Compact single-line: "2 critical, 3 warnings, 1 info" with severity-colored text. Shows green "All clear" when zero alerts. Links to notification center.
+- **Notification settings page:** `/admin/notifications` — admin-only page with alert type cards grouped by category (Code Review, Workload, Risk, Collaboration, Trend, System). Each card: label, description, enable toggle, threshold inputs (auto-save with 800ms debounce). Contribution category exclusion multi-select. Evaluation interval config + "Evaluate now" button. `useNotificationConfig` / `useUpdateNotificationConfig` / `useEvaluateNotifications` hooks. Added to Admin sidebar and dropdown.
 
 ## Architecture Advisory
 

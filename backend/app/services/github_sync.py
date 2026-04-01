@@ -2335,6 +2335,13 @@ async def run_sync(
                 except Exception as e:
                     ctx.sync_logger.warning("Collaboration score recomputation failed", error=str(e), event_type="system.sync")
 
+                # Evaluate notification alerts post-sync
+                try:
+                    from app.services.notifications import evaluate_all_alerts
+                    await evaluate_all_alerts(db)
+                except Exception as e:
+                    ctx.sync_logger.warning("Post-sync notification evaluation failed", error=str(e), event_type="system.sync")
+
                 # Determine final status
                 if cancelled:
                     sync_event.status = "cancelled"

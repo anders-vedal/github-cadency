@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import Developer, NotificationLog, PullRequest, SlackConfig, SlackUserSettings
 from app.services.slack import (
     build_config_response,
+    decrypt_token,
+    encrypt_token,
+    get_decrypted_bot_token,
     get_slack_config,
     get_slack_user_settings,
     send_high_risk_pr_alert,
@@ -56,7 +59,10 @@ class TestUpdateSlackConfig:
         )
         config = await update_slack_config(db_session, updates, "admin")
         assert config.slack_enabled is True
-        assert config.bot_token == "xoxb-test-token"
+        # bot_token is stored encrypted — verify it decrypts back to the original
+        assert config.bot_token != "xoxb-test-token"  # encrypted, not plaintext
+        assert config.bot_token.startswith("gAAAAAB")  # Fernet ciphertext prefix
+        assert get_decrypted_bot_token(config) == "xoxb-test-token"
         assert config.default_channel == "#test-channel"
         assert config.updated_by == "admin"
 
@@ -129,12 +135,40 @@ class TestSendHighRiskPrAlert:
     async def test_skips_below_threshold(self, db_session, sample_pr):
         config = await get_slack_config(db_session)
         config.slack_enabled = True
-        config.bot_token = "xoxb-test"
+        config.bot_token = encrypt_token("xoxb-test")
         config.risk_score_threshold = 0.8
         await db_session.commit()
 
         result = await send_high_risk_pr_alert(db_session, sample_pr, 0.5)
         assert result is False
+
+
+class TestTokenEncryption:
+    def test_encrypt_decrypt_roundtrip(self):
+        plaintext = "xoxb-1234567890-abcdef"
+        ciphertext = encrypt_token(plaintext)
+        assert ciphertext != plaintext
+        assert ciphertext.startswith("gAAAAAB")
+        assert decrypt_token(ciphertext) == plaintext
+
+    def test_null_token_returns_none(self, db_session):
+        import asyncio
+
+        async def run():
+            config = await get_slack_config(db_session)
+            assert get_decrypted_bot_token(config) is None
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_decrypt_invalid_ciphertext_returns_none(self, db_session):
+        import asyncio
+
+        async def run():
+            config = await get_slack_config(db_session)
+            config.bot_token = "not-a-valid-fernet-token"
+            assert get_decrypted_bot_token(config) is None
+
+        asyncio.get_event_loop().run_until_complete(run())
 
 
 class TestSendWorkloadAlert:

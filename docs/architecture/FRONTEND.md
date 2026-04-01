@@ -1,6 +1,6 @@
 ---
 purpose: "Routing, component hierarchy, state management, hooks, design system, error/loading patterns"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -40,6 +40,7 @@ All routes defined in `frontend/src/App.tsx`.
 | `/admin/ai/settings` | `AISettingsPage` | Admin | SidebarLayout |
 | `/admin/slack` | `SlackSettingsPage` | Admin | SidebarLayout |
 | `/admin/work-categories` | `WorkCategoriesPage` | Admin | SidebarLayout | Categories table, classification rules table, batch reclassify |
+| `/admin/notifications` | `NotificationSettings` | Admin | SidebarLayout | Per-alert-type toggle cards, threshold config, category exclusion, evaluation controls |
 
 Bare `/insights` and `/admin` redirect to first sub-page. `ProtectedRoute` checks for `devpulse_token` in localStorage.
 
@@ -234,6 +235,23 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 
 `SlackPreferencesSection`: Renders on DeveloperDetail for the user's own profile. Shows Slack user ID input and per-notification-type toggles.
 
+### Notifications (`hooks/useNotifications.ts`)
+
+| Hook | Endpoint | Notes |
+|------|----------|-------|
+| `useNotifications(options?)` | `GET /notifications` | Active alerts with read/dismiss state. 30s staleTime. Filters: severity, alertType, includeDismissed. |
+| `useNotificationConfig()` | `GET /notifications/config` | Admin. Singleton config with alert_types metadata. 60s staleTime. |
+| `useMarkRead()` | `POST /notifications/{id}/read` | Invalidates notifications cache. |
+| `useMarkAllRead()` | `POST /notifications/read-all` | Bulk mark read. |
+| `useDismissNotification()` | `POST /notifications/{id}/dismiss` | Body: {dismissType, durationDays?}. |
+| `useDismissAlertType()` | `POST /notifications/dismiss-type` | Body: {alertType, dismissType, durationDays?}. |
+| `useUpdateNotificationConfig()` | `PATCH /notifications/config` | Admin. Partial update. |
+| `useEvaluateNotifications()` | `POST /notifications/evaluate` | Admin. Trigger on-demand evaluation. |
+
+`NotificationBell` in Layout header (admin only): bell icon with red unread count badge. Click opens `NotificationPanel` dropdown. `NotificationPanel`: severity filter tabs, grouped notification list, per-item dismiss menu (permanent/7d/30d/mute type), read-on-click navigation. `AlertSummaryBar` replaces `AlertStrip` on Dashboard and Workload pages with compact severity count summary.
+
+`NotificationSettings` (`/admin/notifications`): alert type cards grouped by category (Code Review, Workload, Risk, Collaboration, Trend, System), threshold inputs with debounced auto-save, contribution category exclusion, evaluation interval config + "Evaluate now" button.
+
 ### Teams (`hooks/useTeams.ts`)
 
 | Hook | Endpoint | Notes |
@@ -340,4 +358,8 @@ All Recharts 3 with `ResponsiveContainer`:
 | Low | Dead code | `SyncStatus.tsx` imports non-existent `useTriggerSync` -- orphaned file |
 | Low | Cache key | `useToggleTracking` invalidates non-existent `['sync-repos']` key |
 | Low | Error UX | Non-JSON error bodies (e.g., HTML 502) produce unreadable toast messages |
+| Medium | Notifications | No `refetchInterval` on `useNotifications` — the bell badge only updates on user interaction or mutation invalidation, not on a timer. New critical alerts won't appear until the user navigates or acts |
+| Medium | Notifications | `ALERT_TYPE_LABELS` hardcoded in `NotificationPanel` duplicates backend `ALERT_TYPE_META` labels — will drift if alert types are added or renamed |
+| Low | Notifications | `AlertSummaryBar` shows "View in notification center" as a `<span>`, not a `<Link>` — not clickable |
+| Low | Notifications | `NotificationSettings.tsx` passes `error={error}` to `ErrorCard` but `ErrorCardProps` has no `error` prop — silently ignored, error detail never surfaced |
 | Low | Design system | `tooltip.tsx` has `"use client"` directive (Next.js, meaningless in Vite) — copied from Next.js template |

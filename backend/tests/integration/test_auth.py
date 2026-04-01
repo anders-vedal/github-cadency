@@ -1,6 +1,7 @@
 """Integration tests for JWT authentication and role-based access."""
 import pytest
 
+from app.api.auth import create_jwt
 from conftest import make_admin_token, make_developer_token
 
 
@@ -233,3 +234,56 @@ class TestAuthMe:
     async def test_auth_me_no_token_returns_401(self, raw_client):
         resp = await raw_client.get("/api/auth/me")
         assert resp.status_code in (401, 403)
+
+
+class TestTokenVersion:
+    @pytest.mark.asyncio
+    async def test_mismatched_token_version_returns_401(self, raw_client, sample_developer):
+        """A JWT with an old token_version should be rejected."""
+        token = create_jwt(
+            developer_id=sample_developer.id,
+            github_username=sample_developer.github_username,
+            app_role="developer",
+            token_version=999,  # doesn't match DB value of 1
+        )
+        resp = await raw_client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401
+        assert "revoked" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_matching_token_version_succeeds(self, raw_client, sample_developer):
+        """A JWT with the correct token_version should succeed."""
+        token = create_jwt(
+            developer_id=sample_developer.id,
+            github_username=sample_developer.github_username,
+            app_role="developer",
+            token_version=1,
+        )
+        resp = await raw_client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_role_change_increments_token_version(self, client, sample_developer):
+        """Changing app_role via PATCH should increment token_version."""
+        resp = await client.patch(
+            f"/api/developers/{sample_developer.id}",
+            json={"app_role": "admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["token_version"] == 2
+
+    @pytest.mark.asyncio
+    async def test_deactivation_increments_token_version(self, client, sample_developer):
+        """Deactivating a developer should increment token_version."""
+        resp = await client.patch(
+            f"/api/developers/{sample_developer.id}",
+            json={"is_active": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["token_version"] == 2

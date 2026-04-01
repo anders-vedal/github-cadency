@@ -6,6 +6,7 @@ import { useUnassignedRoleCount } from '@/hooks/useStats'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import DateRangePicker from '@/components/DateRangePicker'
+import NotificationBell from '@/components/NotificationCenter/NotificationBell'
 
 interface NavItem {
   to: string
@@ -38,6 +39,7 @@ const adminNavItems: NavEntry[] = [
       { to: '/admin/ai/settings', label: 'AI Settings' },
       { to: '/admin/slack', label: 'Slack' },
       { to: '/admin/work-categories', label: 'Work Categories' },
+      { to: '/admin/notifications', label: 'Notifications' },
     ],
   },
 ]
@@ -162,6 +164,7 @@ export default function Layout({ children }: { children: ReactNode }) {
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-sm">
+            {isAdmin && <NotificationBell />}
             <DateRangePicker
               dateFrom={dateFrom}
               dateTo={dateTo}

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.logging import get_logger
 from app.models.database import AsyncSessionLocal
+from app.rate_limit import limiter
 from app.models.models import Issue, PullRequest, Repository
 from app.services.github_sync import (
     compute_approval_metrics,
@@ -36,11 +37,18 @@ def verify_signature(payload: bytes, signature: str) -> bool:
 
 
 @router.post("/webhooks/github", status_code=status.HTTP_200_OK)
+@limiter.limit("60/minute")
 async def github_webhook(
     request: Request,
     x_hub_signature_256: str = Header(...),
     x_github_event: str = Header(...),
 ):
+    if not settings.github_webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Webhook signature verification not configured — set GITHUB_WEBHOOK_SECRET",
+        )
+
     body = await request.body()
 
     if not verify_signature(body, x_hub_signature_256):

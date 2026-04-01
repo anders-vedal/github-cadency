@@ -1,6 +1,6 @@
 ---
 purpose: "Navigation hub for architecture documentation"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/DATA-MODEL.md
@@ -34,6 +34,9 @@ This directory contains interconnected architecture documents for DevPulse. Gene
 | How work categories are configured | [DATA-MODEL.md](DATA-MODEL.md) | `work_categories` + `work_category_rules` tables |
 | How work categorization rules work | [SERVICE-LAYER.md](SERVICE-LAYER.md) | Work categorization algorithm |
 | How benchmarks peer groups work | [SERVICE-LAYER.md](SERVICE-LAYER.md) | Key algorithms |
+| How the notification center works | [SERVICE-LAYER.md](SERVICE-LAYER.md) | Notification evaluation |
+| How notification alerts are evaluated | [DATA-FLOWS.md](DATA-FLOWS.md) | Notification evaluation pipeline |
+| How notification tables relate | [DATA-MODEL.md](DATA-MODEL.md) | `notifications` + related tables |
 
 ## Related References
 

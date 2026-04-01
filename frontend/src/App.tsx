@@ -38,6 +38,7 @@ const ExecutiveDashboard = lazy(() => import('@/pages/ExecutiveDashboard'))
 const AISettingsPage = lazy(() => import('@/pages/settings/AISettings'))
 const SlackSettingsPage = lazy(() => import('@/pages/settings/SlackSettings'))
 const WorkCategoriesPage = lazy(() => import('@/pages/settings/WorkCategories'))
+const NotificationSettings = lazy(() => import('@/pages/settings/NotificationSettings'))
 
 function PageSkeleton() {
   return (
@@ -69,6 +70,7 @@ const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/ai/settings', label: 'AI Settings' },
   { to: '/admin/slack', label: 'Slack' },
   { to: '/admin/work-categories', label: 'Work Categories' },
+  { to: '/admin/notifications', label: 'Notifications' },
 ]
 
 const queryClient = new QueryClient({
@@ -161,6 +163,7 @@ function AppRoutes() {
                                 <Route path="/ai/settings" element={<AISettingsPage />} />
                                 <Route path="/slack" element={<SlackSettingsPage />} />
                                 <Route path="/work-categories" element={<WorkCategoriesPage />} />
+                                <Route path="/notifications" element={<NotificationSettings />} />
                                 <Route path="*" element={<Navigate to="/admin/team" replace />} />
                               </Routes>
                             </ErrorBoundary>

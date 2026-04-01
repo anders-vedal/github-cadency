@@ -28,6 +28,24 @@ from app.schemas.schemas import (
 
 logger = get_logger(__name__)
 
+# Pattern that detects nested quantifiers — a leading cause of catastrophic
+# backtracking (ReDoS).  Examples: ``(a+)+``, ``(x*)*``, ``(a|b+)+$``.
+_NESTED_QUANTIFIER_RE = re.compile(
+    r"\([^)]*[+*][^)]*\)[+*?]|\([^)]*[+*][^)]*\)\{",
+)
+
+
+def _validate_regex_safe(pattern: str) -> None:
+    """Validate a regex pattern: must compile and must not contain nested quantifiers."""
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern: {e}")
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        raise ValueError(
+            "Pattern contains nested quantifiers which may cause performance issues"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Read helpers
@@ -232,12 +250,9 @@ async def create_rule(db: AsyncSession, data: WorkCategoryRuleCreate) -> WorkCat
     if not cat:
         raise ValueError(f"Category '{data.category_key}' not found")
 
-    # Validate regex if title_regex
+    # Validate regex if title_regex (includes ReDoS check)
     if data.match_type == "title_regex":
-        try:
-            re.compile(data.match_value)
-        except re.error as e:
-            raise ValueError(f"Invalid regex pattern: {e}")
+        _validate_regex_safe(data.match_value)
 
     rule = WorkCategoryRule(
         match_type=data.match_type,
@@ -268,10 +283,7 @@ async def update_rule(
     if data.match_value is not None:
         match_type = data.match_type or rule.match_type
         if match_type == "title_regex":
-            try:
-                re.compile(data.match_value)
-            except re.error as e:
-                raise ValueError(f"Invalid regex pattern: {e}")
+            _validate_regex_safe(data.match_value)
         rule.match_value = data.match_value
 
     if data.description is not None:
@@ -529,10 +541,7 @@ async def bulk_create_rules(
         if data.category_key not in valid_categories:
             raise ValueError(f"Category '{data.category_key}' not found")
         if data.match_type == "title_regex":
-            try:
-                re.compile(data.match_value)
-            except re.error as e:
-                raise ValueError(f"Invalid regex pattern '{data.match_value}': {e}")
+            _validate_regex_safe(data.match_value)
 
     created = 0
     for data in rules_data:

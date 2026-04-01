@@ -531,3 +531,55 @@ async def test_developer_cannot_mutate(developer_client):
 
     resp = await developer_client.post("/api/work-categories/reclassify")
     assert resp.status_code == 403
+
+
+# --- ReDoS protection ---
+
+
+@pytest.mark.asyncio
+async def test_create_rule_nested_quantifier_rejected(client):
+    """Regex patterns with nested quantifiers are rejected (ReDoS protection)."""
+    resp = await client.post("/api/work-categories/rules", json={
+        "match_type": "title_regex",
+        "match_value": "(a+)+$",
+        "category_key": "feature",
+        "priority": 999,
+    })
+    assert resp.status_code == 409
+    assert "nested quantifiers" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_create_rule_valid_regex_accepted(client):
+    """Non-dangerous regex patterns are still accepted."""
+    resp = await client.post("/api/work-categories/rules", json={
+        "match_type": "title_regex",
+        "match_value": r"\bhotfix\b",
+        "category_key": "bugfix",
+        "priority": 998,
+    })
+    assert resp.status_code == 201
+
+
+# --- Schema max_length validation ---
+
+
+@pytest.mark.asyncio
+async def test_create_rule_match_value_too_long(client):
+    resp = await client.post("/api/work-categories/rules", json={
+        "match_type": "label",
+        "match_value": "x" * 1001,
+        "category_key": "feature",
+        "priority": 1,
+    })
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_category_display_name_too_long(client):
+    resp = await client.post("/api/work-categories", json={
+        "category_key": "testlong",
+        "display_name": "x" * 201,
+        "color": "#000000",
+    })
+    assert resp.status_code == 422

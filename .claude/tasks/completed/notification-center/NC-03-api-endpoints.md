@@ -4,7 +4,7 @@
 Notification Center v2
 
 ## Status
-pending
+completed
 
 ## Blocked By
 - NC-01-backend-models-migration

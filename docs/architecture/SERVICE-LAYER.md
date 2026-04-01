@@ -1,6 +1,6 @@
 ---
 purpose: "Service responsibilities, cross-service deps, async patterns, sync architecture, key algorithms"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -28,6 +28,7 @@ related:
 | `work_categories` | `services/work_categories.py` | ~550 | Work category + rule CRUD, admin-configurable classification rules, batch reclassify, GitHub data suggestions scan, bulk rule create |
 | `teams` | `services/teams.py` | ~100 | Team registry CRUD, `resolve_team()` auto-create, `_validate_team_name()`, rename cascading |
 | `slack` | `services/slack.py` | ~350 | Slack config/user settings CRUD, notification senders (DM + channel), scheduled jobs |
+| `notifications` | `services/notifications.py` | ~1300 | In-app notification center: alert evaluation (16 types, 10 evaluators), materialization, read/dismiss tracking, config CRUD, auto-resolution |
 | `exceptions` | `services/exceptions.py` | ~25 | Custom service-layer exceptions (`AIFeatureDisabledError`, `AIBudgetExceededError`) |
 | `utils` | `services/utils.py` | ~15 | Shared utilities (`default_range` date defaulting) |
 
@@ -47,6 +48,12 @@ github_sync
   -> work_categories        (classify_work_item_with_rules, get_all_rules -- lazy import)
   -> enhanced_collaboration (post-sync recompute_collaboration_scores -- lazy import, non-blocking)
   -> slack                  (post-sync send_sync_notification -- lazy import, non-blocking)
+  -> notifications          (post-sync evaluate_all_alerts -- lazy import, non-blocking)
+
+notifications
+  -> risk          (compute_pr_risk for high-risk PR alerts)
+  -> ai_settings   (budget check for ai_budget alert)
+  -> config        (validate_github_config for missing_config alerts)
 
 slack
   -> stats         (get_team_stats for weekly digest)
@@ -269,6 +276,33 @@ Classification provenance tracked via `work_category_source` column: `label`, `t
 
 `total_load = open_authored + open_reviewing + open_issues`. Thresholds: low (0), balanced (1-5), high (6-12), overloaded (>12).
 
+### Notification Evaluation (`evaluate_all_alerts`)
+
+Orchestrates 10 evaluators that produce 16 alert types across the system. Each evaluator:
+1. Queries current state from the database
+2. Upsererts notifications via `_upsert_notification()` (dedup by `alert_key`)
+3. Calls `_auto_resolve_stale()` to resolve alerts whose conditions have cleared
+4. Returns a set of active `alert_key` values
+
+**Evaluators and their alert types:**
+
+| Evaluator | Alert types | Inputs |
+|-----------|------------|--------|
+| `_evaluate_stale_pr_alerts` | `stale_pr` (3 sub-checks: no review, unresolved changes, approved-not-merged) | Open PRs vs `stale_pr_threshold_hours` |
+| `_evaluate_workload_alerts` | `review_bottleneck`, `underutilized`, `uneven_assignment`, `merged_without_approval` | Review counts, open issues, merged PRs |
+| `_evaluate_revert_spike_alert` | `revert_spike` | Merged PR revert rate vs `revert_spike_threshold_pct` |
+| `_evaluate_risk_alerts` | `high_risk_pr` | `compute_pr_risk()` on open PRs vs `high_risk_pr_min_level` |
+| `_evaluate_collaboration_alerts` | `bus_factor`, `team_silo`, `isolated_developer` | Review distribution, cross-team reviews |
+| `_evaluate_trend_alerts` | `declining_trend` | Current vs previous period PR count and review quality |
+| `_evaluate_issue_linkage_alerts` | `issue_linkage` | Per-dev linkage rate vs `issue_linkage_threshold_pct` |
+| `_evaluate_ai_budget_alert` | `ai_budget` | AI usage vs budget warning threshold |
+| `_evaluate_sync_failure_alert` | `sync_failure` | Most recent sync event status |
+| `_evaluate_config_alerts` | `unassigned_roles`, `missing_config` | Role assignment + config validation |
+
+**Excluded developers:** `_get_excluded_developer_ids()` queries `role_definitions` by `exclude_contribution_categories` (default: `["system", "non_contributor"]`) and removes matching developers from activity-based evaluators (stale PRs, workload, trends, issue linkage). Collaboration and system alerts are not filtered.
+
+**Error isolation:** Each evaluator is wrapped in try/except — a failure in one does not prevent others from running.
+
 ### Collaboration Insights (`_compute_insights`)
 
 - **Silos**: Cross-team pairs with no reviews between them
@@ -287,5 +321,7 @@ Classification provenance tracked via `work_category_source` column: `label`, `t
 | Medium | Sync | `github_get()` for check-runs (`/commits/{sha}/check-runs`) only processes the first page — silently truncates CI data for PRs with many checks |
 | Medium | Side effect | `get_goal_progress()` auto-achieves goals during what appears to be a read operation |
 | Medium | AI | `_call_claude_and_store()` (internal helper) does NOT apply feature/budget guards — any code calling it directly bypasses budget checks |
+| Medium | Notifications | `evaluate_all_alerts()` dispatches all evaluators but routes some differently (ai_budget and sync_failure skip `excluded_dev_ids`, config evaluator also skips it) — the conditional dispatch in the for-loop is fragile; a table-driven approach would be cleaner |
+| Medium | Notifications | `_evaluate_stale_pr_alerts` has 3 independent sub-queries (no-review, changes-requested, approved-not-merged) that could produce overlapping `alert_key`s for the same PR — dedup via `active_keys` set prevents DB duplicates but the "approved but not merged" check redundantly re-queries PRs already covered |
 | Low | DRY | `_default_range()` duplicated in 5 service files (stats, collaboration, risk, work_category, enhanced_collaboration) |
 | Low | AI data | Correlated subquery in `_gather_developer_texts()` for issue comment filtering |

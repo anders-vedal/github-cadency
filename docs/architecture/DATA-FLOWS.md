@@ -1,6 +1,6 @@
 ---
 purpose: "Step-by-step data flows with file:function references for all major operations"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -78,6 +78,15 @@ Resume: `api/sync.py:resume_sync()` computes remaining repo IDs from `repos_comp
    c. compute_deployment_lead_times()
    d. detect_deployment_failures() -> flag failures (3 signals: failed workflow, revert PRs within 48h, hotfix PRs), link recovery deployments for MTTR
 8. Commit, update repo.last_synced_at
+```
+
+### Post-Sync Hooks
+
+After sync completes (step 10 of orchestration):
+
+```
+10a. evaluate_all_alerts(db) -> notification evaluation (lazy import, non-blocking)
+10b. send_sync_notification(db, sync_event) -> Slack notification (lazy import, non-blocking)
 ```
 
 ### Error Isolation (per-repo failure)
@@ -226,16 +235,16 @@ UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
    b. GET https://api.github.com/user (fetch profile)
    c. SELECT Developer by github_username
    d. If not found: CREATE Developer(app_role="developer")
-      - If username matches devpulse_initial_admin: app_role="admin"
+      - If username matches devpulse_initial_admin AND no admin exists: app_role="admin"
    e. If is_active=False: return 403
-   f. create_jwt(dev.id, username, app_role) -> HS256, 7-day expiry
-   g. Return 302 redirect to frontend /auth/callback?token={jwt}
+   f. create_jwt(dev.id, username, app_role, token_version) -> HS256, 4-hour expiry
+   g. Return 302 redirect to frontend /auth/callback#token={jwt}
 6. Frontend AuthCallback: store token in localStorage, redirect to /
 
 Per-request auth:
 1. apiFetch() adds Authorization: Bearer <token> header
-2. Backend: get_current_user() decodes JWT, queries developers.is_active
-   - 401 if token invalid/expired, developer not found, or is_active=False
+2. Backend: get_current_user() decodes JWT, queries developers.is_active + token_version
+   - 401 if token invalid/expired, developer not found, is_active=False, or token_version mismatch
 3. require_admin() checks app_role == "admin"
 4. On 401: frontend clears token, redirects to /login
 ```
@@ -377,15 +386,17 @@ Categories and rules are managed via the `/api/work-categories` API surface (`se
 5. If auto_sync_enabled:
    a. Add incremental sync job: interval, every incremental_interval_minutes
    b. Add full sync job: cron at full_sync_cron_hour:00, misfire_grace_time=None
-6. Add Slack scheduled jobs:
+6. Load NotificationConfig singleton -> evaluation_interval_minutes (default 15)
+   a. Add notification_evaluation job: interval, every evaluation_interval_minutes
+7. Add Slack scheduled jobs:
    a. scheduled_stale_pr_check: hourly at :05 (checks configured hour at runtime)
    b. scheduled_weekly_digest: hourly at :10 (checks configured day+hour at runtime)
-7. scheduler.start(), store in app.state.scheduler
-8. yield -> app serves requests
-9. On shutdown: scheduler.shutdown(wait=True)
+8. scheduler.start(), store in app.state.scheduler
+9. yield -> app serves requests
+10. On shutdown: scheduler.shutdown(wait=True)
 
 Router registration (main.py):
-- All 12 routers get /api prefix
+- All 15 routers get /api prefix
 - CORS: allow_origins=[frontend_url], credentials=True, all methods/headers
 - Standalone GET /api/health (no auth)
 ```
@@ -416,13 +427,77 @@ Router registration (main.py):
 
 Admin configures via `PATCH /slack/config` (stored in `slack_config` singleton). Each developer configures their Slack user ID and notification preferences via `PATCH /slack/user-settings`. Bot token stored in DB (not env var) for runtime configurability.
 
+## 10. Notification Evaluation Pipeline
+
+**Entry**: `services/notifications.py:evaluate_all_alerts`
+
+### Trigger Points
+
+1. **Scheduled**: APScheduler interval job every `evaluation_interval_minutes` (default 15) → `scheduled_notification_evaluation()` in `main.py`
+2. **Post-sync**: `github_sync.py:run_sync()` step 10a → `evaluate_all_alerts(db)` (lazy import, non-blocking — sync completes regardless)
+3. **On-demand**: `POST /api/notifications/evaluate` (admin) → `evaluate_all_alerts(db)`
+
+### Evaluation Orchestration
+
+```
+1. get_notification_config(db) -> load singleton (id=1), auto-create if missing
+2. _get_excluded_developer_ids(db, config.exclude_contribution_categories)
+   - Query role_definitions for roles in excluded categories (default: system, non_contributor)
+   - Query active developers with those roles -> excluded set
+3. For each evaluator in [stale_pr, workload, revert_spike, high_risk_pr,
+   collaboration, declining_trend, issue_linkage, ai_budget, sync_failure, config]:
+   a. Check per-type enabled toggle
+   b. Run evaluator(db, config, excluded_dev_ids) in try/except
+      - On failure: log warning, continue to next evaluator
+4. db.commit() (single commit for all evaluators)
+5. Log active notification count
+```
+
+### Per-Evaluator Pattern
+
+Each evaluator follows this pattern:
+
+```
+1. Query current state from DB (e.g., open PRs, review counts)
+2. Filter out excluded developers
+3. For each alert condition met:
+   a. Compute alert_key: "{type}:{entity_type}:{entity_id}"
+   b. _upsert_notification(db, alert_key, ...) ->
+      - SELECT by alert_key (UNIQUE constraint)
+      - If exists: update severity/title/body, clear resolved_at if was resolved
+      - If new: INSERT Notification row
+   c. Add key to active_keys set
+4. _auto_resolve_stale(db, alert_type, active_keys) ->
+   - SELECT notifications WHERE type=X AND resolved_at IS NULL AND alert_key NOT IN active_keys
+   - SET resolved_at = now() on each
+```
+
+### Notification Query Flow (`GET /api/notifications`)
+
+```
+1. Base query: SELECT notifications WHERE resolved_at IS NULL
+2. Apply severity/alert_type filters
+3. Load user's reads: SELECT notification_id FROM notification_reads WHERE user_id=X
+4. Load user's instance dismissals: SELECT notification_id FROM notification_dismissals
+   WHERE user_id=X AND (permanent OR (temporary AND expires_at > now))
+5. Load user's type dismissals: SELECT alert_type FROM notification_type_dismissals
+   WHERE user_id=X AND (permanent OR (temporary AND expires_at > now))
+6. For each notification:
+   - is_read = id in read_ids
+   - is_dismissed = id in dismissed_ids OR alert_type in dismissed_types
+   - Filter out dismissed unless include_dismissed=true
+7. Sort: severity priority (critical > warning > info), then newest first
+8. Compute: unread_count, counts_by_severity, total
+9. Paginate and return NotificationsListResponse
+```
+
 ## Architectural Concerns
 
 | Severity | Area | Description |
 |----------|------|-------------|
 | ~~High~~ | ~~AI~~ | ~~`run_one_on_one_prep()` and `run_team_health()` import `get_benchmarks` (renamed)~~ — **Fixed**: Updated to `get_benchmarks_v2` |
-| ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access up to 7 days~~ — **Fixed**: `get_current_user()` now checks `developers.is_active` on every request |
-| Medium | Auth | JWT delivered in URL query parameter (`?token=...`) — visible in browser history, server logs, and Referer headers |
+| ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access up to 7 days~~ — **Fixed**: `get_current_user()` checks `developers.is_active` + `token_version` on every request. Token lifetime reduced to 4 hours. Role changes and deactivation increment `token_version`, immediately invalidating existing JWTs. |
+| ~~Medium~~ | ~~Auth~~ | ~~JWT delivered in URL query parameter (`?token=...`) — visible in browser history, server logs, and Referer headers~~ — **Fixed**: Token now delivered in URL fragment (`#token=`), which is never sent to servers or included in Referer headers |
 | Medium | Sync | Auto-reactivation in `resolve_author()` / `sync_org_contributors()` can undo manual deactivation -- if the developer appears in GitHub activity or org members during the next sync, `is_active` is silently set back to `True` (warning log only) |
 | Medium | Sync | `scheduled_sync()` blocks APScheduler — long-running syncs prevent Slack scheduled jobs from running on time |
 | Medium | Sync | Issue comment parent resolution via string-splitting `issue_url` (`split("/")[-1]`) — fragile if GitHub URL format changes |
@@ -430,9 +505,13 @@ Admin configures via `PATCH /slack/config` (stored in `slack_config` singleton).
 | Medium | Webhooks | Review comments on unknown PRs silently dropped (no retry mechanism) |
 | Medium | Webhooks | No dedup/queue -- rapid events on same PR trigger concurrent full re-syncs |
 | Medium | Webhooks | `handle_pull_request_review()` calls `recompute_review_quality_tiers()` but not `compute_approval_metrics()` -- approval fields stale until next scheduled sync |
+| Medium | Webhooks | Webhook handlers do not trigger `evaluate_all_alerts()` — a PR becoming stale via a webhook event won't generate an alert until the next scheduled evaluation (15 min) or sync |
 | ~~Medium~~ | ~~Collaboration~~ | ~~`recompute_collaboration_scores()` always uses last-30-day window~~ — **Fixed**: Uses `since_override` or 90-day window for full syncs |
 | ~~Medium~~ | ~~AI~~ | ~~No retry or timeout handling on Claude API calls~~ — **Fixed**: Client uses `max_retries=3` and `timeout=120s` |
 | Medium | Goals | Auto-achievement is a write side effect on a GET endpoint |
 | Low | Timestamps | `_safe_delta_seconds` / `_to_naive` workarounds for SQLite vs PostgreSQL timezone mismatch |
-| Low | Config | Empty `jwt_secret` produces a warning but app starts with insecure signing |
-| Low | Auth | No JWT refresh mechanism — users must re-authenticate every 7 days via full OAuth flow |
+| ~~Low~~ | ~~Config~~ | ~~Empty `jwt_secret` produces a warning but app starts with insecure signing~~ — **Fixed**: App now exits with fatal error if `JWT_SECRET` is missing or <32 characters |
+| Low | Auth | No JWT refresh mechanism — users must re-authenticate every 4 hours via full OAuth flow |
+| Medium | Notifications | `evaluate_all_alerts()` returns a `counts` dict initialized to zeros but never populated — result is always `{"created": 0, "updated": 0, "resolved": 0}` regardless of actual work done |
+| Medium | Notifications | `get_active_notifications()` loads ALL active notifications into memory before filtering/paginating — no SQL-level pagination; will degrade with large notification volumes |
+| Low | Notifications | `notification_evaluation` scheduler interval loaded once at startup from `notification_config.evaluation_interval_minutes` — updating config via API does not reschedule the job (requires restart) |

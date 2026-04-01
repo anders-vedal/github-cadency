@@ -296,13 +296,12 @@ class TestRecategorize:
         assert 52 not in numbers
 
     @pytest.mark.asyncio
-    async def test_recategorize_accessible_by_developer(
+    async def test_recategorize_rejected_for_developer(
         self, developer_client, sample_developer, sample_repo, pr_unknown
     ):
-        """Any authenticated user can recategorize."""
+        """Non-admin users cannot recategorize items."""
         resp = await developer_client.patch(
             f"/api/stats/work-allocation/items/pr/{pr_unknown.id}/category",
             json={"category": "feature"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["category"] == "feature"
+        assert resp.status_code == 403

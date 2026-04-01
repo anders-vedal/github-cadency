@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = 15
     full_sync_cron_hour: int = 2
 
+    # Encryption (required when Slack bot token is configured)
+    encryption_key: str = ""
+
+    # Rate limiting
+    rate_limit_enabled: bool = True
+
     # DORA metrics
     deploy_workflow_name: str = ""
     deploy_environment: str = "production"
@@ -47,8 +53,11 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-if not settings.jwt_secret:
-    logger.warning("JWT_SECRET is not set — authentication will be insecure")
+if not settings.jwt_secret or len(settings.jwt_secret) < 32:
+    raise SystemExit(
+        "FATAL: JWT_SECRET must be set and at least 32 characters. "
+        "Generate one with: openssl rand -hex 32"
+    )
 
 
 def validate_github_config() -> list[dict]:
@@ -141,6 +150,21 @@ def validate_github_config() -> list[dict]:
                 "status": "error",
                 "message": f"Cannot read '{key_path.resolve()}' — permission denied.",
             })
+
+    # Webhook secret
+    if not settings.github_webhook_secret:
+        checks.append({
+            "field": "GITHUB_WEBHOOK_SECRET",
+            "status": "warn",
+            "message": "GITHUB_WEBHOOK_SECRET is not set. Webhook signature verification is disabled. "
+                       "Generate one with: openssl rand -hex 32",
+        })
+    else:
+        checks.append({
+            "field": "GITHUB_WEBHOOK_SECRET",
+            "status": "ok",
+            "message": "Webhook secret configured",
+        })
 
     # GitHub OAuth (warn only)
     if not settings.github_client_id or not settings.github_client_secret:

@@ -155,8 +155,16 @@ async def update_developer(
     if "team" in updates and updates["team"] is not None:
         updates["team"] = await resolve_team(db, updates["team"])
 
+    # Increment token_version when app_role or is_active changes (invalidates existing JWTs)
+    role_changing = "app_role" in updates and updates["app_role"] != dev.app_role
+    deactivating = "is_active" in updates and updates["is_active"] != dev.is_active
+
     for field, value in updates.items():
         setattr(dev, field, value.value if isinstance(value, PyEnum) else value)
+
+    if role_changing or deactivating:
+        dev.token_version = (dev.token_version or 1) + 1
+
     dev.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -226,5 +234,6 @@ async def delete_developer(
         raise HTTPException(status_code=404, detail="Developer not found")
 
     dev.is_active = False
+    dev.token_version = (dev.token_version or 1) + 1
     dev.updated_at = datetime.now(timezone.utc)
     await db.commit()

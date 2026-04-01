@@ -1,17 +1,22 @@
+import secrets
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import create_jwt, get_current_user
 from app.config import settings
+from app.logging import get_logger
 from app.models.database import get_db
+from app.rate_limit import limiter
 from app.models.models import Developer
 from app.schemas.schemas import AuthMeResponse, AuthUser
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -19,22 +24,45 @@ GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 
+OAUTH_STATE_COOKIE = "devpulse_oauth_state"
+OAUTH_STATE_MAX_AGE = 600  # 10 minutes
+
 
 @router.get("/auth/login")
-async def login():
+@limiter.limit("10/minute")
+async def login(request: Request):
+    state = secrets.token_urlsafe(32)
     params = {
         "client_id": settings.github_client_id,
         "redirect_uri": f"{settings.frontend_url}/auth/callback",
         "scope": "read:user",
+        "state": state,
     }
-    return {"url": f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"}
+    response = JSONResponse(content={"url": f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"})
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE,
+        value=state,
+        max_age=OAUTH_STATE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=not settings.frontend_url.startswith("http://localhost"),
+    )
+    return response
 
 
 @router.get("/auth/callback")
+@limiter.limit("10/minute")
 async def callback(
+    request: Request,
     code: str = Query(...),
+    state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
+    # Validate OAuth state parameter (CSRF protection)
+    cookie_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not cookie_state or cookie_state != state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF attack")
+
     # Exchange code for GitHub access token
     async with httpx.AsyncClient() as client:
         token_resp = await client.post(
@@ -67,8 +95,23 @@ async def callback(
             raise HTTPException(status_code=502, detail="Failed to fetch GitHub user")
 
         gh_user = user_resp.json()
+        github_username = gh_user["login"]
 
-    github_username = gh_user["login"]
+        # Check org membership (if GITHUB_ORG is configured)
+        if settings.github_org:
+            org_resp = await client.get(
+                f"https://api.github.com/orgs/{settings.github_org}/members/{github_username}",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            if org_resp.status_code == 404:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied: {github_username} is not a member of the {settings.github_org} organization",
+                )
+
     avatar_url = gh_user.get("avatar_url")
     display_name = gh_user.get("name") or github_username
 
@@ -80,11 +123,29 @@ async def callback(
 
     now = datetime.now(timezone.utc)
     if dev is None:
-        # Determine role: initial admin or regular developer
-        app_role = "admin" if (
+        # Determine role: initial admin (only if no admin exists yet) or regular developer
+        app_role = "developer"
+        if (
             settings.devpulse_initial_admin
             and github_username.lower() == settings.devpulse_initial_admin.lower()
-        ) else "developer"
+        ):
+            existing_admin = (await db.execute(
+                select(Developer).where(Developer.app_role == "admin").limit(1)
+            )).scalar_one_or_none()
+            if existing_admin is None:
+                app_role = "admin"
+                logger.warning(
+                    "Initial admin granted",
+                    username=github_username,
+                    event_type="system.config",
+                )
+            else:
+                logger.info(
+                    "Initial admin env var ignored — admin already exists",
+                    username=github_username,
+                    existing_admin=existing_admin.github_username,
+                    event_type="system.config",
+                )
 
         dev = Developer(
             github_username=github_username,
@@ -107,13 +168,17 @@ async def callback(
         await db.refresh(dev)
 
     # Issue JWT
-    token = create_jwt(dev.id, dev.github_username, dev.app_role)
+    token = create_jwt(dev.id, dev.github_username, dev.app_role, dev.token_version)
 
-    # Redirect to frontend with token
-    return RedirectResponse(
-        url=f"{settings.frontend_url}/auth/callback?token={token}",
+    # Redirect to frontend with token in URL fragment (not query param)
+    # Fragments are never sent to servers or included in referrer headers
+    response = RedirectResponse(
+        url=f"{settings.frontend_url}/auth/callback#token={token}",
         status_code=302,
     )
+    # Clear the state cookie after successful validation
+    response.delete_cookie(key=OAUTH_STATE_COOKIE)
+    return response
 
 
 @router.get("/auth/me", response_model=AuthMeResponse)

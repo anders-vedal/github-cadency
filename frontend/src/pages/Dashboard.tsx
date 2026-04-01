@@ -23,7 +23,8 @@ import {
 import type { RiskAssessment, WorkloadAlert, DeveloperWorkload, TeamStats } from '@/utils/types'
 import { riskLevelLabels, riskLevelStyles } from '@/utils/types'
 
-import AlertStrip, { workloadStyles } from '@/components/AlertStrip'
+import AlertSummaryBar from '@/components/NotificationCenter/AlertSummaryBar'
+import { workloadStyles } from '@/components/AlertStrip'
 import SortableHead from '@/components/SortableHead'
 
 // --- Trend helpers ---
@@ -182,8 +183,8 @@ export default function Dashboard() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Dashboard</h1>
 
-      {/* Zone 1: Needs Attention alert strip */}
-      {workload && <AlertStrip alerts={workload.alerts} />}
+      {/* Zone 1: Compact alert summary bar */}
+      <AlertSummaryBar />
 
       {/* Zone 1b: Stale PRs — Needs Attention */}
       {stalePRs && stalePRs.stale_prs.length > 0 && (

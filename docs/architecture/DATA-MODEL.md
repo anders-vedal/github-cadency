@@ -1,6 +1,6 @@
 ---
 purpose: "ER diagram, all tables and relationships, FK decisions, JSONB structures, migration patterns"
-last-updated: "2026-03-31"
+last-updated: "2026-04-01"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -24,6 +24,12 @@ erDiagram
     developers ||--o{ developer_collaboration_scores : "collaborator B"
     developers ||--o| slack_user_settings : "has"
     developers ||--o{ notification_log : "receives"
+    developers ||--o{ notifications : "about"
+    developers ||--o{ notification_reads : "reads"
+    developers ||--o{ notification_dismissals : "dismisses"
+    developers ||--o{ notification_type_dismissals : "type dismissals"
+    notifications ||--o{ notification_reads : "read by"
+    notifications ||--o{ notification_dismissals : "dismissed by"
 
     repositories ||--o{ pull_requests : "contains"
     repositories ||--o{ issues : "contains"
@@ -69,6 +75,7 @@ Team registry with GitHub identity and app role.
 | `team` | String(255) | YES | | |
 | `office` | String(255) | YES | | Free-form office location |
 | `app_role` | String(20) | NO | | `"admin"` or `"developer"` (default) |
+| `token_version` | Integer | NO | 1 | Incremented on role change, deactivation, or soft-delete. Included in JWT payload; `get_current_user()` rejects tokens with stale version (401). |
 | `is_active` | Boolean | NO | | Default `True`. Toggled via PATCH (deactivate/reactivate) or DELETE (soft-delete). Auto-reactivated by sync when inactive dev appears in GitHub activity. |
 | `avatar_url` | Text | YES | | Populated by sync |
 | `notes` | Text | YES | | |
@@ -435,7 +442,7 @@ Singleton (id=1) global Slack integration configuration. Bot token, notification
 |--------|------|------|---------|-------|
 | `id` | Integer PK | NO | | Always 1 |
 | `slack_enabled` | Boolean | NO | false | Master toggle |
-| `bot_token` | Text | YES | | Slack Bot User OAuth Token (xoxb-...). Stored plaintext. |
+| `bot_token` | Text | YES | | Slack Bot User OAuth Token. Encrypted at rest using Fernet (`ENCRYPTION_KEY`). Decrypted on read via `get_decrypted_bot_token()`. |
 | `default_channel` | String(255) | YES | | Fallback channel for sync notifications |
 | `notify_stale_prs` | Boolean | NO | true | Global toggle |
 | `notify_high_risk_prs` | Boolean | NO | true | |
@@ -481,6 +488,92 @@ Audit trail for all Slack notifications sent by DevPulse.
 | `error_message` | Text | YES | | Slack API error if failed |
 | `payload` | JSONB | YES | | Message content for debugging |
 | `created_at` | DateTime(tz) | NO | now() | INDEX |
+
+### `notifications`
+
+Materialized in-app alerts with dedup and lifecycle management. Created by the notification evaluation service, auto-resolved when conditions clear.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `alert_type` | String(50) | NO | | INDEX. One of 16 AlertType enum values (stale_pr, review_bottleneck, etc.) |
+| `alert_key` | String(200) | NO | | UNIQUE. Dedup key format: `{type}:{entity_type}:{entity_id}` |
+| `severity` | String(20) | NO | | INDEX. critical, warning, info |
+| `title` | Text | NO | | Human-readable alert title |
+| `body` | Text | YES | | Detail text |
+| `entity_type` | String(50) | YES | | pull_request, developer, repository, team, system |
+| `entity_id` | Integer | YES | | FK-less reference to the entity |
+| `link_path` | String(500) | YES | | Frontend route or GitHub URL |
+| `developer_id` | Integer FK | YES | | INDEX. FK → developers. Who the alert is about (NULL for team/system) |
+| `metadata` | JSONB | YES | | Extra data (risk factors, threshold values, counts) |
+| `resolved_at` | DateTime(tz) | YES | | INDEX. NULL = active, set = auto-resolved |
+| `created_at` | DateTime(tz) | NO | now() | INDEX |
+| `updated_at` | DateTime(tz) | NO | now() | |
+
+Composite index: `(alert_type, resolved_at)` for efficient "active alerts by type" queries.
+
+### `notification_reads`
+
+Per-user read tracking (separate from dismiss). Reading clears the badge count.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `notification_id` | Integer FK | NO | | FK → notifications |
+| `user_id` | Integer FK | NO | | INDEX. FK → developers |
+| `read_at` | DateTime(tz) | NO | now() | |
+
+Constraint: `UNIQUE(notification_id, user_id)`.
+
+### `notification_dismissals`
+
+Per-instance dismissal with optional expiry. Dismissing hides the notification.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `notification_id` | Integer FK | NO | | FK → notifications |
+| `user_id` | Integer FK | NO | | INDEX. FK → developers |
+| `dismiss_type` | String(20) | NO | | permanent or temporary |
+| `expires_at` | DateTime(tz) | YES | | INDEX. NULL for permanent. Expired entries ignored at query time. |
+| `created_at` | DateTime(tz) | NO | now() | |
+
+Constraint: `UNIQUE(notification_id, user_id)`.
+
+### `notification_type_dismissals`
+
+Dismiss an entire alert type per user (e.g., "mute all underutilized alerts for 7 days").
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `alert_type` | String(50) | NO | | Alert type string |
+| `user_id` | Integer FK | NO | | INDEX. FK → developers |
+| `dismiss_type` | String(20) | NO | | permanent or temporary |
+| `expires_at` | DateTime(tz) | YES | | NULL for permanent |
+| `created_at` | DateTime(tz) | NO | now() | |
+
+Constraint: `UNIQUE(alert_type, user_id)`.
+
+### `notification_config`
+
+Singleton (id=1) admin-configurable alert thresholds and toggles. Follows AISettings/SlackConfig pattern.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | Always 1 |
+| `alert_*_enabled` | Boolean (×14) | NO | true | Per-alert-type enable toggles |
+| `stale_pr_threshold_hours` | Integer | NO | 48 | |
+| `review_bottleneck_multiplier` | Float | NO | 2.0 | Alert when reviews > N × median |
+| `revert_spike_threshold_pct` | Float | NO | 5.0 | |
+| `high_risk_pr_min_level` | String(20) | NO | high | medium, high, or critical |
+| `issue_linkage_threshold_pct` | Float | NO | 20.0 | |
+| `declining_trend_pr_drop_pct` | Float | NO | 30.0 | |
+| `declining_trend_quality_drop_pct` | Float | NO | 20.0 | |
+| `exclude_contribution_categories` | JSONB | YES | ["system","non_contributor"] | Developers with these categories excluded from activity alerts |
+| `evaluation_interval_minutes` | Integer | NO | 15 | Scheduled evaluation interval |
+| `updated_at` | DateTime(tz) | NO | now() | |
+| `updated_by` | String(255) | YES | | |
 
 ### `benchmark_group_config`
 
@@ -603,11 +696,11 @@ Stats are PR-level only to stay within GitHub API rate limits.
 
 ## Migration Patterns
 
-31 migrations from `000_initial_schema` through `030_add_work_categories_and_rules`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
+34 migrations from `000_initial_schema` through `033_add_notification_center`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
 
 `000_initial_schema` is the root migration (`down_revision = None`). It creates the 10 base tables (`developers`, `repositories`, `pull_requests`, `pr_reviews`, `pr_review_comments`, `issues`, `issue_comments`, `sync_events`, `ai_analyses`, `developer_goals`) with their original columns. All subsequent migrations are additive from this base. `alembic upgrade head` is self-contained on a blank database.
 
-Recent migrations (023-030): `benchmark_group_config` table + 4 seeded groups (023), `work_category_source` columns on PRs and issues (024), `sync_schedule_config` singleton (025), `triggered_by` and `sync_scope` on sync_events (026), `role_definitions` table + 13 seeded roles + `issues.creator_id` FK (027), missing indexes on `issue_comments.issue_id` and `pr_review_comments.pr_id` (028), `teams` table + 2 new seeded roles (`senior_devops`, `other`) (029), `work_categories` + `work_category_rules` tables with seed data + widen `work_category` columns to String(50) (030).
+Recent migrations (023-033): `benchmark_group_config` table + 4 seeded groups (023), `work_category_source` columns on PRs and issues (024), `sync_schedule_config` singleton (025), `triggered_by` and `sync_scope` on sync_events (026), `role_definitions` table + 13 seeded roles + `issues.creator_id` FK (027), missing indexes on `issue_comments.issue_id` and `pr_review_comments.pr_id` (028), `teams` table + 2 new seeded roles (`senior_devops`, `other`) (029), `work_categories` + `work_category_rules` tables with seed data + widen `work_category` columns to String(50) (030), Slack integration tables (031), structured logging tables (032), notification center tables (`notifications`, `notification_reads`, `notification_dismissals`, `notification_type_dismissals`, `notification_config`) with 6 indexes + singleton seed (033).
 
 Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive DDL.
 
@@ -632,6 +725,7 @@ Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive 
 | Low | Timestamps | `datetime.utcnow` (deprecated in Python 3.12+) used as column default instead of `func.now()` |
 | ~~Low~~ | ~~Types~~ | ~~`DeveloperGoal.target_date` ORM annotation is `Mapped[datetime | None]` but column is `Date`~~ — **Fixed:** Now `Mapped[date | None]` |
 | ~~Low~~ | ~~Timestamps~~ | ~~`SlackUserSettings.updated_at` missing `onupdate`~~ — **Fixed:** Added `onupdate=datetime.utcnow` |
+| Medium | Schema gap | `notification_config` has 14 alert toggle columns but `ALERT_TYPE_META` defines 16 types — `alert_team_silo_enabled` and `alert_isolated_developer_enabled` are missing. Service uses `getattr(config, field, True)` fallback, making these alert types permanently un-togglable from the admin UI |
 | Low | ORM | `developer_collaboration_scores` has FK columns but no `relationship()` declarations -- cannot use ORM joins |
 | Low | ORM | `sync_events.resumed_from_id` FK exists at DB level but has no ORM relationship |
 | Low | Missing links | `pr_review_comments` and `issue_comments` have no `author_id` FK -- no developer attribution |

@@ -14,15 +14,24 @@ bearer_scheme = HTTPBearer()
 JWT_ALGORITHM = "HS256"
 
 
-def create_jwt(developer_id: int, github_username: str, app_role: str) -> str:
+TOKEN_EXPIRY_HOURS = 4
+
+
+def create_jwt(
+    developer_id: int,
+    github_username: str,
+    app_role: str,
+    token_version: int = 1,
+) -> str:
     import datetime
 
     payload = {
         "developer_id": developer_id,
         "github_username": github_username,
         "app_role": app_role,
+        "token_version": token_version,
         "exp": datetime.datetime.now(datetime.timezone.utc)
-        + datetime.timedelta(days=7),
+        + datetime.timedelta(hours=TOKEN_EXPIRY_HOURS),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM)
 
@@ -42,30 +51,40 @@ async def get_current_user(
             detail="Invalid or expired token",
         )
 
-    # Check that the developer is still active in the database
+    # Check that the developer is still active and token_version matches
     from app.models.models import Developer
 
     developer_id = payload.get("developer_id")
     result = await db.execute(
-        select(Developer.is_active).where(Developer.id == developer_id)
+        select(Developer.is_active, Developer.app_role, Developer.token_version).where(
+            Developer.id == developer_id
+        )
     )
-    is_active = result.scalar_one_or_none()
+    row = result.first()
 
-    if is_active is None:
+    if row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Developer account not found",
         )
-    if not is_active:
+    if not row.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account has been deactivated",
         )
 
+    # Reject tokens issued before a role change or explicit revocation
+    jwt_token_version = payload.get("token_version", 1)
+    if jwt_token_version != row.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked — please log in again",
+        )
+
     return AuthUser(
         developer_id=payload["developer_id"],
         github_username=payload["github_username"],
-        app_role=payload["app_role"],
+        app_role=row.app_role,
     )
 
 

@@ -372,24 +372,27 @@ GET    /api/ai/history/{id}             Get a specific analysis result
 1. User clicks "Login with GitHub" → frontend calls `GET /api/auth/login` → receives GitHub OAuth authorize URL
 2. User authorizes on GitHub → redirected to `GET /api/auth/callback?code=...`
 3. Backend exchanges code for GitHub access token, fetches GitHub user profile
-4. Backend looks up or creates developer by `github_username`, issues a signed JWT (7-day expiry)
-5. Backend redirects to frontend with JWT → frontend stores in `localStorage`
+4. Backend looks up or creates developer by `github_username`, issues a signed JWT (4-hour expiry, includes `token_version`)
+5. Backend redirects to frontend with JWT in URL fragment → frontend stores in `localStorage`
 6. All subsequent API calls include `Authorization: Bearer {jwt}`
 
 **Roles:**
 - `admin` — full access to all endpoints (manage developers, view all stats, sync, AI analysis)
 - `developer` — read-only access to own stats, profile, goals, and repo stats
 
-**Bootstrap:** Set `DEVPULSE_INITIAL_ADMIN` env var to a GitHub username. That user is auto-promoted to `admin` on first OAuth login. Subsequently, admins can promote other users via `PATCH /api/developers/{id}` with `app_role: "admin"`.
+**Bootstrap:** Set `DEVPULSE_INITIAL_ADMIN` env var to a GitHub username. That user is auto-promoted to `admin` on first OAuth login, but only if no admin already exists in the database. Once an admin account exists, this env var is ignored. Subsequently, admins can promote other users via `PATCH /api/developers/{id}` with `app_role: "admin"`.
 
-**Access control:** Endpoints use per-route dependency injection — `get_current_user()` returns `AuthUser(developer_id, github_username, app_role)`, `require_admin()` raises `403 Forbidden` for non-admin users. Public endpoints: `/api/health`, `/api/webhooks/github`, `/api/auth/*`.
+**Access control:** Endpoints use per-route dependency injection — `get_current_user()` returns `AuthUser(developer_id, github_username, app_role)` after checking `is_active` and `token_version` against the database, `require_admin()` raises `403 Forbidden` for non-admin users. Public endpoints: `/api/health`, `/api/webhooks/github`, `/api/auth/*`.
+
+**Token revocation:** `developers.token_version` is included in the JWT payload and validated on every authenticated request. Changing `app_role` or `is_active` increments `token_version`, immediately invalidating all existing JWTs for that user.
 
 **Environment variables:**
 - `GITHUB_CLIENT_ID` — GitHub OAuth client ID (from GitHub App settings)
 - `GITHUB_CLIENT_SECRET` — GitHub OAuth client secret
-- `JWT_SECRET` — secret for signing JWT tokens (min 32 chars recommended)
-- `DEVPULSE_INITIAL_ADMIN` — GitHub username auto-promoted to admin on first login (optional)
+- `JWT_SECRET` — secret for signing JWT tokens (min 32 chars, required)
+- `DEVPULSE_INITIAL_ADMIN` — GitHub username auto-promoted to admin on first login; ignored once any admin exists (optional)
 - `FRONTEND_URL` — frontend URL for OAuth redirect (default: `http://localhost:5173`)
+- `ENCRYPTION_KEY` — Fernet key for encrypting Slack bot token at rest (required when Slack is used)
 
 
 ## 6. AI Analysis Module

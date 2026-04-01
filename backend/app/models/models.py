@@ -39,6 +39,7 @@ class Developer(Base):
         String(255), ForeignKey("teams.name", onupdate="CASCADE", ondelete="SET NULL")
     )
     app_role: Mapped[str] = mapped_column(String(20), nullable=False, default="developer", server_default="developer")
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     avatar_url: Mapped[str | None] = mapped_column(Text)
     office: Mapped[str | None] = mapped_column(String(255))
@@ -786,6 +787,129 @@ class WorkCategoryRule(Base):
     )
 
     category: Mapped["WorkCategory"] = relationship(back_populates="rules")
+
+
+class Notification(Base):
+    """Materialized alert records with dedup and lifecycle management."""
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_alert_type", "alert_type"),
+        Index("ix_notifications_severity", "severity"),
+        Index("ix_notifications_resolved_at", "resolved_at"),
+        Index("ix_notifications_developer_id", "developer_id"),
+        Index("ix_notifications_created_at", "created_at"),
+        Index("ix_notifications_type_resolved", "alert_type", "resolved_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    alert_key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str | None] = mapped_column(Text)
+    entity_type: Mapped[str | None] = mapped_column(String(50))
+    entity_id: Mapped[int | None] = mapped_column(Integer)
+    link_path: Mapped[str | None] = mapped_column(String(500))
+    developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
+    metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+
+class NotificationRead(Base):
+    """Tracks which users have seen each notification."""
+    __tablename__ = "notification_reads"
+    __table_args__ = (
+        UniqueConstraint("notification_id", "user_id", name="uq_notification_read"),
+        Index("ix_notification_reads_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    notification_id: Mapped[int] = mapped_column(ForeignKey("notifications.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("developers.id"), nullable=False)
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+
+
+class NotificationDismissal(Base):
+    """Per-instance dismissal with optional expiry."""
+    __tablename__ = "notification_dismissals"
+    __table_args__ = (
+        UniqueConstraint("notification_id", "user_id", name="uq_notification_dismissal"),
+        Index("ix_notification_dismissals_user", "user_id"),
+        Index("ix_notification_dismissals_expires", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    notification_id: Mapped[int] = mapped_column(ForeignKey("notifications.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("developers.id"), nullable=False)
+    dismiss_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+
+
+class NotificationTypeDismissal(Base):
+    """Dismiss an entire alert type (e.g. mute all underutilized alerts for 7 days)."""
+    __tablename__ = "notification_type_dismissals"
+    __table_args__ = (
+        UniqueConstraint("alert_type", "user_id", name="uq_notification_type_dismissal"),
+        Index("ix_notification_type_dismissals_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("developers.id"), nullable=False)
+    dismiss_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+
+
+class NotificationConfig(Base):
+    """Singleton (id=1) admin-configurable alert thresholds and toggles."""
+    __tablename__ = "notification_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Per-alert-type enable toggles
+    alert_stale_pr_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_review_bottleneck_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_underutilized_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_uneven_assignment_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_merged_without_approval_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_revert_spike_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_high_risk_pr_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_bus_factor_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_declining_trends_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_issue_linkage_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_ai_budget_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_sync_failure_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_unassigned_roles_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_missing_config_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    # Configurable thresholds
+    stale_pr_threshold_hours: Mapped[int] = mapped_column(Integer, server_default="48")
+    review_bottleneck_multiplier: Mapped[float] = mapped_column(Float, server_default="2.0")
+    revert_spike_threshold_pct: Mapped[float] = mapped_column(Float, server_default="5.0")
+    high_risk_pr_min_level: Mapped[str] = mapped_column(String(20), server_default="high")
+    issue_linkage_threshold_pct: Mapped[float] = mapped_column(Float, server_default="20.0")
+    declining_trend_pr_drop_pct: Mapped[float] = mapped_column(Float, server_default="30.0")
+    declining_trend_quality_drop_pct: Mapped[float] = mapped_column(Float, server_default="20.0")
+    # Contribution category exclusion
+    exclude_contribution_categories: Mapped[list | None] = mapped_column(JSONB, server_default='["system", "non_contributor"]')
+    # Evaluation schedule
+    evaluation_interval_minutes: Mapped[int] = mapped_column(Integer, server_default="15")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class RoleDefinition(Base):
