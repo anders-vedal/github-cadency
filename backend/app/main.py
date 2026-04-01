@@ -286,11 +286,16 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=True)
 
 
+_is_production = settings.environment == "production"
+
 app = FastAPI(
     title="DevPulse",
     description="Engineering intelligence dashboard",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if not _is_production else None,
+    redoc_url="/redoc" if not _is_production else None,
+    openapi_url="/openapi.json" if not _is_production else None,
 )
 
 
@@ -310,6 +315,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "0"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if settings.environment == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 app.include_router(oauth.router, prefix="/api", tags=["auth"])
 app.include_router(developers.router, prefix="/api", tags=["developers"])

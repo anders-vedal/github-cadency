@@ -1,0 +1,15 @@
+# Development overrides — automatically loaded by `docker compose up`.
+# Not used in production (deploy with `docker compose -f docker-compose.yml up`).
+services:
+  backend:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    # Override USER to root for volume mount compatibility in dev
+    user: root
+    volumes:
+      - ./backend:/app
+      - ./github-app.pem:/app/github-app.pem:ro
+
+  frontend:
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules

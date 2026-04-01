@@ -3,7 +3,7 @@
 **Priority:** Backlog
 **Severity:** LOW
 **Effort:** Low
-**Status:** Pending
+**Status:** Complete
 
 ## Findings
 
@@ -20,29 +20,22 @@
 
 ## Required Changes
 
-### 1. Add non-root user to backend Dockerfile
-- Already covered in SA-09 task #5, noting here for completeness
-- Ensure the PEM file mount is readable by the non-root user
+### 1. Add non-root user to backend Dockerfile — ALREADY DONE
+- `backend/Dockerfile` already has `adduser appuser`, `COPY --chown=appuser:appuser`, and `USER appuser`
+- PEM file readability depends on host permissions (must be world-readable or UID-matched)
 
 ### 2. Evaluate Docker socket necessity for Promtail
 - Promtail uses the Docker socket to discover container labels for log routing
 - Alternative: use file-based log collection (Promtail reads from `/var/log/`) without socket access
 - If socket is required, document the risk and ensure Promtail image is pinned to a specific version
 
-### 3. Remove `privileged: true` from cAdvisor
-- **File:** `docker-compose.yml:107`
-- Replace with specific Linux capabilities:
-  ```yaml
-  cap_add:
-    - SYS_PTRACE
-  security_opt:
-    - apparmor:unconfined
-  ```
-- Or evaluate if cAdvisor is necessary at all (Prometheus may be sufficient)
+### 3. Remove `privileged: true` from cAdvisor — NOT APPLICABLE
+- cAdvisor in `docker-compose.yml` does NOT have `privileged: true` (only read-only volume mounts)
+- No action needed
 
-### 4. Pin all infrastructure image versions
-- Currently using `latest` or unversioned tags for infrastructure services
-- Pin to specific versions to prevent supply chain attacks via image tag mutation
+### 4. Pin all infrastructure image versions — DONE
+- Pinned `postgres:15` → `postgres:15.17` (all other images were already pinned)
+- All observability images already versioned: loki:3.4.2, promtail:3.4.2, grafana:11.6.0, prometheus:v3.2.1, cadvisor:v0.51.0
 
 ## Impact Analysis
 
@@ -66,10 +59,10 @@
 
 | File | Change | Risk |
 |------|--------|------|
-| `backend/Dockerfile` | Add `USER appuser` (shared with SA-09) | Low — PEM readability |
-| `backend/.dockerignore` (new) | Exclude `.env`, `*.pem`, `tests/`, `*.pyc`, `.git` | None |
-| `docker-compose.yml:~107` | Replace `privileged: true` with specific capabilities | Low |
-| `docker-compose.yml:~4` | Pin `postgres:15` to `postgres:15.6` (or current patch) | None |
+| `backend/Dockerfile` | Already has `USER appuser` — no change needed | N/A |
+| `backend/.dockerignore` (new) | Created — excludes `.env`, `*.pem`, `tests/`, `*.pyc`, `.git`, `.claude/` | None |
+| `docker-compose.yml:~97` | cAdvisor has no `privileged: true` — no change needed | N/A |
+| `docker-compose.yml:~2` | Pinned `postgres:15` → `postgres:15.17` | None |
 
 ### What to defer
 

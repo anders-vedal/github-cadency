@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Encryption (required when Slack bot token is configured)
     encryption_key: str = ""
 
+    # Environment
+    environment: str = "development"  # "development" or "production"
+
     # Rate limiting
     rate_limit_enabled: bool = True
 

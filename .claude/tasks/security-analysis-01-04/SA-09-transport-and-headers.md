@@ -3,7 +3,7 @@
 **Priority:** Planned
 **Severity:** MEDIUM (#15, #18), LOW (#21)
 **Effort:** Medium
-**Status:** Pending
+**Status:** Done
 
 ## Findings
 

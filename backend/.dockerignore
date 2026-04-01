@@ -1,0 +1,11 @@
+.env
+.env.*
+*.pem
+tests/
+*.pyc
+__pycache__/
+.git/
+.gitignore
+.claude/
+.pytest_cache/
+.mypy_cache/
