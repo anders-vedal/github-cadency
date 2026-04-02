@@ -38,6 +38,7 @@ export default function StepConfigureScope({
           <Select
             value={scopeId || undefined}
             onValueChange={(v) => {
+              if (!v) return
               const dev = activeDevelopers.find((d) => String(d.id) === v)
               onScopeSelect(v, dev ? `${dev.display_name} (@${dev.github_username})` : v)
             }}
@@ -71,6 +72,7 @@ export default function StepConfigureScope({
           <Select
             value={scopeId || undefined}
             onValueChange={(v) => {
+              if (!v) return
               onScopeSelect(v, v === '__all__' ? 'All teams' : v)
             }}
           >
@@ -100,6 +102,7 @@ export default function StepConfigureScope({
           <Select
             value={scopeId || undefined}
             onValueChange={(v) => {
+              if (!v) return
               const repo = repos.find((r) => String(r.id) === v)
               onScopeSelect(v, repo?.full_name ?? v)
             }}

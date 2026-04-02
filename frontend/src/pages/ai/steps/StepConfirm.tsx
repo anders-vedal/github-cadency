@@ -288,7 +288,7 @@ export default function StepConfirm({
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-2">
                   <Label>Frequency</Label>
-                  <Select value={frequency} onValueChange={setFrequency}>
+                  <Select value={frequency} onValueChange={(v) => { if (v) setFrequency(v) }}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>

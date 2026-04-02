@@ -42,7 +42,7 @@ export default function StepTimeRange({
   const [repoSearch, setRepoSearch] = useState('')
 
   const filteredRepos = trackedRepos.filter((r) =>
-    r.full_name.toLowerCase().includes(repoSearch.toLowerCase()),
+    (r.full_name ?? '').toLowerCase().includes(repoSearch.toLowerCase()),
   )
 
   const toggleRepo = (id: number) => {

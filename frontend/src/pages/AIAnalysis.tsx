@@ -59,11 +59,9 @@ function HistoryList({
     return (
       <div className="py-8 text-center">
         <p className="text-sm text-muted-foreground">{emptyMessage}</p>
-        <Button asChild className="mt-3">
-          <Link to="/admin/ai/new">
+        <Button className="mt-3" render={<Link to="/admin/ai/new" />}>
             <Plus className="mr-2 h-4 w-4" />
             New Analysis
-          </Link>
         </Button>
       </div>
     )
@@ -181,10 +179,8 @@ function ScheduleRow({ schedule }: { schedule: AISchedule }) {
           >
             <Play className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Edit" asChild>
-            <Link to={`/admin/ai/new?schedule=${schedule.id}`}>
+          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Edit" render={<Link to={`/admin/ai/new?schedule=${schedule.id}`} />}>
               <Pencil className="h-3.5 w-3.5" />
-            </Link>
           </Button>
           <Button
             variant="ghost"
@@ -273,11 +269,9 @@ export default function AIAnalysis() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">AI Analysis</h1>
-        <Button asChild>
-          <Link to="/admin/ai/new">
+        <Button render={<Link to="/admin/ai/new" />}>
             <Plus className="mr-2 h-4 w-4" />
             New Analysis
-          </Link>
         </Button>
       </div>
 
@@ -308,7 +302,7 @@ export default function AIAnalysis() {
         <TabsContent value="history">
           <div className="space-y-4">
             <div className="flex justify-end">
-              <Select value={typeFilter} onValueChange={setTypeFilter}>
+              <Select value={typeFilter} onValueChange={(v) => { if (v) setTypeFilter(v) }}>
                 <SelectTrigger className="w-48">
                   <SelectValue />
                 </SelectTrigger>
@@ -337,11 +331,9 @@ export default function AIAnalysis() {
               <p className="text-sm text-muted-foreground">
                 No scheduled analyses. Create one from the New Analysis wizard.
               </p>
-              <Button asChild className="mt-3">
-                <Link to="/admin/ai/new">
+              <Button className="mt-3" render={<Link to="/admin/ai/new" />}>
                   <Plus className="mr-2 h-4 w-4" />
                   New Analysis
-                </Link>
               </Button>
             </div>
           ) : (

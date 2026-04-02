@@ -31,7 +31,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import StatCard from '@/components/StatCard'
 import TrendChart from '@/components/charts/TrendChart'
 import PercentileBar from '@/components/charts/PercentileBar'
@@ -769,15 +768,11 @@ export default function DeveloperDetail() {
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">AI Analysis</h2>
           <div className="flex gap-2">
-            <Button asChild>
-              <Link to={`/admin/ai/new?type=one_on_one_prep&developer_id=${devId}`}>
+            <Button render={<Link to={`/admin/ai/new?type=one_on_one_prep&developer_id=${devId}`} />}>
                 Generate 1:1 Prep Brief
-              </Link>
             </Button>
-            <Button variant="outline" asChild>
-              <Link to={`/admin/ai/new?type=communication&developer_id=${devId}`}>
+            <Button variant="outline" render={<Link to={`/admin/ai/new?type=communication&developer_id=${devId}`} />}>
                 Run AI Analysis
-              </Link>
             </Button>
           </div>
         </div>
