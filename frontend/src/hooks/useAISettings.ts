@@ -43,12 +43,14 @@ export function useAICostEstimate() {
       scope_id?: string
       date_from?: string
       date_to?: string
+      repo_ids?: number[]
     }) => {
       const qs = new URLSearchParams({ feature: params.feature })
       if (params.scope_type) qs.set('scope_type', params.scope_type)
       if (params.scope_id) qs.set('scope_id', params.scope_id)
       if (params.date_from) qs.set('date_from', params.date_from)
       if (params.date_to) qs.set('date_to', params.date_to)
+      if (params.repo_ids?.length) qs.set('repo_ids', params.repo_ids.join(','))
       return apiFetch<AICostEstimate>(`/ai/estimate?${qs}`, { method: 'POST' })
     },
   })

@@ -95,20 +95,25 @@ async def _gather_developer_texts(
     developer_id: int,
     date_from: datetime,
     date_to: datetime,
+    repo_ids: list[int] | None = None,
 ) -> tuple[list[dict], str]:
     """Gather PR bodies, review comments, and issue comments for a developer."""
     items: list[dict] = []
 
     # PR descriptions
+    pr_query = (
+        select(PullRequest)
+        .where(
+            PullRequest.author_id == developer_id,
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+        )
+    )
+    if repo_ids:
+        pr_query = pr_query.where(PullRequest.repo_id.in_(repo_ids))
     prs = (
         await db.execute(
-            select(PullRequest)
-            .where(
-                PullRequest.author_id == developer_id,
-                PullRequest.created_at >= date_from,
-                PullRequest.created_at <= date_to,
-            )
-            .order_by(PullRequest.created_at.desc())
+            pr_query.order_by(PullRequest.created_at.desc())
             .limit(MAX_ITEMS_PER_CATEGORY)
         )
     ).scalars().all()
@@ -121,15 +126,21 @@ async def _gather_developer_texts(
             })
 
     # Reviews given
+    review_query = (
+        select(PRReview)
+        .where(
+            PRReview.reviewer_id == developer_id,
+            PRReview.submitted_at >= date_from,
+            PRReview.submitted_at <= date_to,
+        )
+    )
+    if repo_ids:
+        review_query = review_query.join(
+            PullRequest, PRReview.pr_id == PullRequest.id
+        ).where(PullRequest.repo_id.in_(repo_ids))
     reviews = (
         await db.execute(
-            select(PRReview)
-            .where(
-                PRReview.reviewer_id == developer_id,
-                PRReview.submitted_at >= date_from,
-                PRReview.submitted_at <= date_to,
-            )
-            .order_by(PRReview.submitted_at.desc())
+            review_query.order_by(PRReview.submitted_at.desc())
             .limit(MAX_ITEMS_PER_CATEGORY)
         )
     ).scalars().all()
@@ -142,22 +153,29 @@ async def _gather_developer_texts(
             })
 
     # Issue comments
+    github_username = (
+        await db.execute(
+            select(Developer.github_username).where(Developer.id == developer_id)
+        )
+    ).scalar_one_or_none()
+    if not github_username:
+        summary = f"Developer {developer_id}: not found"
+        return items, summary
+    comment_query = (
+        select(IssueComment)
+        .where(
+            IssueComment.author_github_username == github_username,
+            IssueComment.created_at >= date_from,
+            IssueComment.created_at <= date_to,
+        )
+    )
+    if repo_ids:
+        comment_query = comment_query.join(
+            Issue, IssueComment.issue_id == Issue.id
+        ).where(Issue.repo_id.in_(repo_ids))
     comments = (
         await db.execute(
-            select(IssueComment)
-            .where(
-                IssueComment.author_github_username
-                == (
-                    await db.execute(
-                        select(Developer.github_username).where(
-                            Developer.id == developer_id
-                        )
-                    )
-                ).scalar_one(),
-                IssueComment.created_at >= date_from,
-                IssueComment.created_at <= date_to,
-            )
-            .order_by(IssueComment.created_at.desc())
+            comment_query.order_by(IssueComment.created_at.desc())
             .limit(MAX_ITEMS_PER_CATEGORY)
         )
     ).scalars().all()
@@ -180,6 +198,7 @@ async def _gather_team_texts(
     team_name: str,
     date_from: datetime,
     date_to: datetime,
+    repo_ids: list[int] | None = None,
 ) -> tuple[list[dict], str]:
     """Gather team-wide interactions for conflict analysis."""
     dev_rows = (
@@ -194,17 +213,21 @@ async def _gather_team_texts(
     items: list[dict] = []
 
     # Reviews between team members (especially CHANGES_REQUESTED)
+    review_query = (
+        select(PRReview, PullRequest.author_id, PullRequest.title)
+        .join(PullRequest, PRReview.pr_id == PullRequest.id)
+        .where(
+            PRReview.reviewer_id.in_(dev_ids),
+            PullRequest.author_id.in_(dev_ids),
+            PRReview.submitted_at >= date_from,
+            PRReview.submitted_at <= date_to,
+        )
+    )
+    if repo_ids:
+        review_query = review_query.where(PullRequest.repo_id.in_(repo_ids))
     reviews = (
         await db.execute(
-            select(PRReview, PullRequest.author_id, PullRequest.title)
-            .join(PullRequest, PRReview.pr_id == PullRequest.id)
-            .where(
-                PRReview.reviewer_id.in_(dev_ids),
-                PullRequest.author_id.in_(dev_ids),
-                PRReview.submitted_at >= date_from,
-                PRReview.submitted_at <= date_to,
-            )
-            .order_by(PRReview.submitted_at.desc())
+            review_query.order_by(PRReview.submitted_at.desc())
             .limit(MAX_ITEMS_PER_CATEGORY)
         )
     ).all()
@@ -232,12 +255,13 @@ async def _gather_scope_texts(
     scope_id: str,
     date_from: datetime,
     date_to: datetime,
+    repo_ids: list[int] | None = None,
 ) -> tuple[list[dict], str]:
     """Route to the right data gatherer based on scope."""
     if scope_type == "developer":
-        return await _gather_developer_texts(db, int(scope_id), date_from, date_to)
+        return await _gather_developer_texts(db, int(scope_id), date_from, date_to, repo_ids=repo_ids)
     elif scope_type == "team":
-        return await _gather_team_texts(db, scope_id, date_from, date_to)
+        return await _gather_team_texts(db, scope_id, date_from, date_to, repo_ids=repo_ids)
     elif scope_type == "repo":
         # Sentiment for repo — gather all comments
         items: list[dict] = []
@@ -324,6 +348,7 @@ async def run_analysis(
     date_to: datetime,
     triggered_by: str = "api",
     force: bool = False,
+    repo_ids: list[int] | None = None,
 ) -> AIAnalysis:
     """Run an AI analysis and store the result."""
     from app.services.ai_settings import (
@@ -375,7 +400,7 @@ async def run_analysis(
 
     # --- Data gathering ---
     items, input_summary = await _gather_scope_texts(
-        db, scope_type, scope_id, date_from, date_to
+        db, scope_type, scope_id, date_from, date_to, repo_ids=repo_ids
     )
 
     if not items:
@@ -574,12 +599,165 @@ KEY GUIDELINES:
   or "High reopen rate may indicate unclear acceptance criteria"."""
 
 
+async def build_one_on_one_context(
+    db: AsyncSession,
+    developer_id: int,
+    date_from: datetime,
+    date_to: datetime,
+    repo_ids: list[int] | None = None,
+) -> tuple[dict, str]:
+    """Build the full 1:1 context dict without calling Claude.
+
+    Returns (context_dict, input_summary).
+    """
+    from app.services.goals import get_goal_progress, list_goals
+    from app.services.stats import (
+        get_benchmarks_v2,
+        get_developer_stats,
+        get_developer_trends,
+        get_issue_creator_stats,
+    )
+
+    dev = await db.get(Developer, developer_id)
+    if not dev:
+        return {}, f"Developer {developer_id} not found"
+
+    # 1. Developer stats for the period
+    stats = await get_developer_stats(db, developer_id, date_from, date_to)
+
+    # 2. Trend data — last 4 periods
+    trends = await get_developer_trends(db, developer_id, periods=4, period_type="week")
+
+    # 3. Team benchmarks for comparison
+    benchmarks = await get_benchmarks_v2(db, team=dev.team, date_from=date_from, date_to=date_to)
+
+    # 4. PRs merged/opened with titles
+    pr_query = (
+        select(PullRequest.number, PullRequest.title, PullRequest.state, PullRequest.is_merged, PullRequest.html_url)
+        .where(
+            PullRequest.author_id == developer_id,
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+        )
+    )
+    if repo_ids:
+        pr_query = pr_query.where(PullRequest.repo_id.in_(repo_ids))
+    prs = (await db.execute(pr_query.order_by(PullRequest.created_at.desc()).limit(30))).all()
+
+    # 5. Review activity summary with quality tiers (M1)
+    rq_query = (
+        select(PRReview.quality_tier, func.count())
+        .where(
+            PRReview.reviewer_id == developer_id,
+            PRReview.submitted_at >= date_from,
+            PRReview.submitted_at <= date_to,
+        )
+    )
+    if repo_ids:
+        rq_query = rq_query.join(
+            PullRequest, PRReview.pr_id == PullRequest.id
+        ).where(PullRequest.repo_id.in_(repo_ids))
+    review_quality_rows = (await db.execute(rq_query.group_by(PRReview.quality_tier))).all()
+
+    # 6. Active goals with progress (M6)
+    goals = await list_goals(db, developer_id)
+    goal_data = []
+    for goal in goals:
+        if goal.status == "active":
+            progress = await get_goal_progress(db, goal.id)
+            if progress:
+                goal_data.append({
+                    "title": progress.title,
+                    "target_value": progress.target_value,
+                    "target_direction": progress.target_direction,
+                    "current_value": progress.current_value,
+                    "baseline_value": progress.baseline_value,
+                    "status": progress.status,
+                })
+
+    # 7. Last 1:1 brief for continuity
+    last_brief_result = await db.execute(
+        select(AIAnalysis)
+        .where(
+            AIAnalysis.analysis_type == "one_on_one_prep",
+            AIAnalysis.scope_type == "developer",
+            AIAnalysis.scope_id == str(developer_id),
+        )
+        .order_by(AIAnalysis.created_at.desc())
+        .limit(1)
+    )
+    last_brief = last_brief_result.scalar_one_or_none()
+
+    # 8. Issue creator stats — include if this developer has created issues
+    issue_creator_context = None
+    has_created_issues = (
+        await db.execute(
+            select(func.count()).select_from(Issue).where(
+                Issue.creator_github_username == dev.github_username,
+                Issue.created_at >= date_from,
+                Issue.created_at <= date_to,
+            )
+        )
+    ).scalar_one()
+    if has_created_issues > 0:
+        creator_stats_resp = await get_issue_creator_stats(
+            db, team=dev.team, date_from=date_from, date_to=date_to
+        )
+        dev_creator = next(
+            (c for c in creator_stats_resp.creators if c.github_username == dev.github_username),
+            None,
+        )
+        if dev_creator:
+            issue_creator_context = {
+                "developer_stats": dev_creator.model_dump(),
+                "team_averages": creator_stats_resp.team_averages.model_dump(),
+            }
+
+    context = {
+        "developer": {
+            "name": dev.display_name,
+            "team": dev.team,
+            "role": dev.role,
+        },
+        "period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
+        "stats": stats.model_dump(),
+        "trends": {
+            "periods": [p.model_dump() for p in trends.periods],
+            "directions": {k: v.model_dump() for k, v in trends.trends.items()},
+        },
+        "benchmarks": {
+            "sample_size": benchmarks.sample_size,
+            "metrics": {k: v.model_dump() for k, v in benchmarks.metrics.items()},
+        } if benchmarks.metrics else None,
+        "prs": [
+            {"number": pr.number, "title": pr.title, "state": pr.state, "merged": pr.is_merged, "url": pr.html_url}
+            for pr in prs
+        ],
+        "review_quality": {tier: count for tier, count in review_quality_rows},
+        "goals": goal_data,
+        "previous_brief": {
+            "period_summary": last_brief.result.get("period_summary"),
+            "suggested_talking_points": last_brief.result.get("suggested_talking_points"),
+        } if last_brief and last_brief.result and not last_brief.result.get("parse_error") else None,
+        "issue_creator_stats": issue_creator_context,
+    }
+
+    input_summary = (
+        f"1:1 prep for {dev.display_name}: {stats.prs_merged} PRs merged, "
+        f"{stats.reviews_given.approved + stats.reviews_given.changes_requested + stats.reviews_given.commented} reviews given, "
+        f"{len(goal_data)} active goals"
+    )
+
+    return context, input_summary
+
+
 async def run_one_on_one_prep(
     db: AsyncSession,
     developer_id: int,
     date_from: datetime,
     date_to: datetime,
     force: bool = False,
+    repo_ids: list[int] | None = None,
 ) -> AIAnalysis:
     """Generate a structured 1:1 prep brief for a developer."""
     from app.services.ai_settings import (
@@ -626,141 +804,8 @@ async def run_one_on_one_prep(
             await db.refresh(reused)
             return reused
 
-    from app.services.goals import get_goal_progress, list_goals
-    from app.services.stats import (
-        get_benchmarks_v2,
-        get_developer_stats,
-        get_developer_trends,
-        get_issue_creator_stats,
-    )
-
-    dev = await db.get(Developer, developer_id)
-
-    # 1. Developer stats for the period
-    stats = await get_developer_stats(db, developer_id, date_from, date_to)
-
-    # 2. Trend data — last 4 periods
-    trends = await get_developer_trends(db, developer_id, periods=4, period_type="week")
-
-    # 3. Team benchmarks for comparison
-    benchmarks = await get_benchmarks_v2(db, team=dev.team, date_from=date_from, date_to=date_to)
-
-    # 4. PRs merged/opened with titles
-    prs = (
-        await db.execute(
-            select(PullRequest.number, PullRequest.title, PullRequest.state, PullRequest.is_merged, PullRequest.html_url)
-            .where(
-                PullRequest.author_id == developer_id,
-                PullRequest.created_at >= date_from,
-                PullRequest.created_at <= date_to,
-            )
-            .order_by(PullRequest.created_at.desc())
-            .limit(30)
-        )
-    ).all()
-
-    # 5. Review activity summary with quality tiers (M1)
-    review_quality_rows = (
-        await db.execute(
-            select(PRReview.quality_tier, func.count())
-            .where(
-                PRReview.reviewer_id == developer_id,
-                PRReview.submitted_at >= date_from,
-                PRReview.submitted_at <= date_to,
-            )
-            .group_by(PRReview.quality_tier)
-        )
-    ).all()
-
-    # 6. Active goals with progress (M6)
-    goals = await list_goals(db, developer_id)
-    goal_data = []
-    for goal in goals:
-        if goal.status == "active":
-            progress = await get_goal_progress(db, goal.id)
-            if progress:
-                goal_data.append({
-                    "title": progress.title,
-                    "target_value": progress.target_value,
-                    "target_direction": progress.target_direction,
-                    "current_value": progress.current_value,
-                    "baseline_value": progress.baseline_value,
-                    "status": progress.status,
-                })
-
-    # 7. Last 1:1 brief for continuity
-    last_brief_result = await db.execute(
-        select(AIAnalysis)
-        .where(
-            AIAnalysis.analysis_type == "one_on_one_prep",
-            AIAnalysis.scope_type == "developer",
-            AIAnalysis.scope_id == str(developer_id),
-        )
-        .order_by(AIAnalysis.created_at.desc())
-        .limit(1)
-    )
-    last_brief = last_brief_result.scalar_one_or_none()
-
-    # 8. Issue creator stats — include if this developer has created issues
-    issue_creator_context = None
-    has_created_issues = (
-        await db.execute(
-            select(func.count()).select_from(Issue).where(
-                Issue.creator_github_username == dev.github_username,
-                Issue.created_at >= date_from,
-                Issue.created_at <= date_to,
-            )
-        )
-    ).scalar_one()
-    if has_created_issues > 0:
-        creator_stats_resp = await get_issue_creator_stats(
-            db, team=dev.team, date_from=date_from, date_to=date_to
-        )
-        # Find this developer's entry in the per-creator list
-        dev_creator = next(
-            (c for c in creator_stats_resp.creators if c.github_username == dev.github_username),
-            None,
-        )
-        if dev_creator:
-            issue_creator_context = {
-                "developer_stats": dev_creator.model_dump(),
-                "team_averages": creator_stats_resp.team_averages.model_dump(),
-            }
-
-    # Build the context document for Claude
-    context = {
-        "developer": {
-            "name": dev.display_name,
-            "team": dev.team,
-            "role": dev.role,
-        },
-        "period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
-        "stats": stats.model_dump(),
-        "trends": {
-            "periods": [p.model_dump() for p in trends.periods],
-            "directions": {k: v.model_dump() for k, v in trends.trends.items()},
-        },
-        "benchmarks": {
-            "sample_size": benchmarks.sample_size,
-            "metrics": {k: v.model_dump() for k, v in benchmarks.metrics.items()},
-        } if benchmarks.metrics else None,
-        "prs": [
-            {"number": pr.number, "title": pr.title, "state": pr.state, "merged": pr.is_merged, "url": pr.html_url}
-            for pr in prs
-        ],
-        "review_quality": {tier: count for tier, count in review_quality_rows},
-        "goals": goal_data,
-        "previous_brief": {
-            "period_summary": last_brief.result.get("period_summary"),
-            "suggested_talking_points": last_brief.result.get("suggested_talking_points"),
-        } if last_brief and last_brief.result and not last_brief.result.get("parse_error") else None,
-        "issue_creator_stats": issue_creator_context,
-    }
-
-    input_summary = (
-        f"1:1 prep for {dev.display_name}: {stats.prs_merged} PRs merged, "
-        f"{stats.reviews_given.approved + stats.reviews_given.changes_requested + stats.reviews_given.commented} reviews given, "
-        f"{len(goal_data)} active goals"
+    context, input_summary = await build_one_on_one_context(
+        db, developer_id, date_from, date_to, repo_ids=repo_ids,
     )
 
     return await _call_claude_and_store(
@@ -809,12 +854,207 @@ KEY GUIDELINES:
 - Strengths are important — always include at least 2-3 positive observations"""
 
 
+async def build_team_health_context(
+    db: AsyncSession,
+    team: str | None,
+    date_from: datetime,
+    date_to: datetime,
+    repo_ids: list[int] | None = None,
+) -> tuple[dict, str]:
+    """Build the full team health context dict without calling Claude.
+
+    Returns (context_dict, input_summary).
+    """
+    from app.services.collaboration import get_collaboration
+    from app.services.stats import get_benchmarks_v2, get_team_stats, get_workload
+
+    # 1. Team stats + benchmarks
+    team_stats = await get_team_stats(db, team=team, date_from=date_from, date_to=date_to)
+    benchmarks = await get_benchmarks_v2(db, team=team, date_from=date_from, date_to=date_to)
+
+    # 2. Workload balance (M4)
+    workload = await get_workload(db, team=team, date_from=date_from, date_to=date_to)
+
+    # 3. Collaboration matrix with insights (M5)
+    collaboration = await get_collaboration(db, team=team, date_from=date_from, date_to=date_to)
+
+    # 4. CHANGES_REQUESTED reviews with body text + metadata (up to 60)
+    dev_query = select(Developer.id, Developer.display_name).where(Developer.is_active.is_(True))
+    if team:
+        dev_query = dev_query.where(Developer.team == team)
+    dev_result = await db.execute(dev_query)
+    dev_rows = dev_result.all()
+    dev_ids = [r.id for r in dev_rows]
+    dev_names = {r.id: r.display_name for r in dev_rows}
+
+    cr_reviews = []
+    if dev_ids:
+        cr_query = (
+            select(PRReview, PullRequest.author_id, PullRequest.title, PullRequest.number)
+            .join(PullRequest, PRReview.pr_id == PullRequest.id)
+            .where(
+                PRReview.state == "CHANGES_REQUESTED",
+                PRReview.reviewer_id.in_(dev_ids),
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+            )
+        )
+        if repo_ids:
+            cr_query = cr_query.where(PullRequest.repo_id.in_(repo_ids))
+        cr_result = (
+            await db.execute(cr_query.order_by(PRReview.submitted_at.desc()).limit(60))
+        ).all()
+        for review, author_id, pr_title, pr_number in cr_result:
+            cr_reviews.append({
+                "reviewer": dev_names.get(review.reviewer_id, "external"),
+                "author": dev_names.get(author_id, "external"),
+                "pr": f"#{pr_number} {pr_title}",
+                "body": _truncate(review.body),
+                "submitted_at": review.submitted_at.isoformat() if review.submitted_at else None,
+            })
+
+    # 5. High back-and-forth issue threads (3+ comments between 2 people)
+    heated_threads = []
+    if dev_ids:
+        dev_usernames_result = await db.execute(
+            select(Developer.id, Developer.github_username).where(Developer.id.in_(dev_ids))
+        )
+        dev_username_map = {r.github_username: r.id for r in dev_usernames_result.all()}
+        dev_name_by_username = {}
+        for uname, did in dev_username_map.items():
+            dev_name_by_username[uname] = dev_names.get(did, uname)
+
+        busy_issues_query = (
+            select(IssueComment.issue_id, func.count().label("cnt"))
+            .where(
+                IssueComment.created_at >= date_from,
+                IssueComment.created_at <= date_to,
+            )
+        )
+        if repo_ids:
+            busy_issues_query = busy_issues_query.join(
+                Issue, IssueComment.issue_id == Issue.id
+            ).where(Issue.repo_id.in_(repo_ids))
+        busy_issues_result = await db.execute(
+            busy_issues_query
+            .group_by(IssueComment.issue_id)
+            .having(func.count() >= 3)
+            .order_by(func.count().desc())
+            .limit(20)
+        )
+        busy_issue_ids = [r.issue_id for r in busy_issues_result.all()]
+
+        for issue_id in busy_issue_ids:
+            issue = await db.get(Issue, issue_id)
+            if not issue:
+                continue
+
+            comments_result = await db.execute(
+                select(IssueComment)
+                .where(IssueComment.issue_id == issue_id)
+                .order_by(IssueComment.created_at.asc())
+            )
+            comments = list(comments_result.scalars().all())
+
+            authors_in_thread = set()
+            for c in comments:
+                if c.author_github_username:
+                    authors_in_thread.add(c.author_github_username)
+
+            tracked_in_thread = authors_in_thread & set(dev_username_map.keys())
+            if len(tracked_in_thread) < 2:
+                continue
+
+            dialogue = []
+            prev_time = None
+            for c in comments:
+                gap_hours = None
+                if prev_time and c.created_at:
+                    gap_hours = round((c.created_at - prev_time).total_seconds() / 3600, 1)
+                if c.created_at:
+                    prev_time = c.created_at
+
+                dialogue.append({
+                    "author": dev_name_by_username.get(
+                        c.author_github_username, c.author_github_username or "unknown"
+                    ),
+                    "body": _truncate(c.body),
+                    "timestamp": c.created_at.isoformat() if c.created_at else None,
+                    "hours_since_previous": gap_hours,
+                })
+
+            heated_threads.append({
+                "issue": f"#{issue.number} {issue.title}",
+                "comment_count": len(comments),
+                "participants": [
+                    dev_name_by_username.get(u, u) for u in tracked_in_thread
+                ],
+                "dialogue": dialogue,
+            })
+
+    # 6. Goal progress across team (M6) — batch query instead of per-dev
+    team_goals = []
+    if dev_ids:
+        all_goals_result = await db.execute(
+            select(DeveloperGoal).where(
+                DeveloperGoal.developer_id.in_(dev_ids),
+                DeveloperGoal.status == "active",
+            )
+        )
+        all_goals = list(all_goals_result.scalars().all())
+        for goal in all_goals:
+            from app.services.goals import _get_metric_value
+            current_value = await _get_metric_value(
+                db, goal.developer_id, goal.metric_key, date_from, date_to
+            )
+            team_goals.append({
+                "developer": dev_names.get(goal.developer_id, "unknown"),
+                "title": goal.title,
+                "metric_key": goal.metric_key,
+                "target_value": goal.target_value,
+                "current_value": round(current_value, 2),
+                "target_direction": goal.target_direction,
+                "status": goal.status,
+            })
+
+    context = {
+        "team": team or "all",
+        "period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
+        "team_stats": team_stats.model_dump(),
+        "benchmarks": {
+            "sample_size": benchmarks.sample_size,
+            "metrics": {k: v.model_dump() for k, v in benchmarks.metrics.items()},
+        } if benchmarks.metrics else None,
+        "workload": {
+            "developers": [d.model_dump() for d in workload.developers],
+            "alerts": [a.model_dump() for a in workload.alerts],
+        },
+        "collaboration": {
+            "insights": collaboration.insights.model_dump(),
+            "pair_count": len(collaboration.matrix),
+        },
+        "changes_requested_reviews": cr_reviews,
+        "heated_threads": heated_threads,
+        "team_goals": team_goals,
+    }
+
+    scope_id = team or "all"
+    input_summary = (
+        f"Team health for '{scope_id}': {team_stats.developer_count} devs, "
+        f"{team_stats.total_prs} PRs, {len(cr_reviews)} CR reviews, "
+        f"{len(heated_threads)} heated threads, {len(workload.alerts)} workload alerts"
+    )
+
+    return context, input_summary
+
+
 async def run_team_health(
     db: AsyncSession,
     team: str | None,
     date_from: datetime,
     date_to: datetime,
     force: bool = False,
+    repo_ids: list[int] | None = None,
 ) -> AIAnalysis:
     """Generate a comprehensive team health assessment."""
     from app.services.ai_settings import (
@@ -862,184 +1102,8 @@ async def run_team_health(
             await db.refresh(reused)
             return reused
 
-    from app.services.collaboration import get_collaboration
-    from app.services.stats import get_benchmarks_v2, get_team_stats, get_workload
-
-    # 1. Team stats + benchmarks
-    team_stats = await get_team_stats(db, team=team, date_from=date_from, date_to=date_to)
-    benchmarks = await get_benchmarks_v2(db, team=team, date_from=date_from, date_to=date_to)
-
-    # 2. Workload balance (M4)
-    workload = await get_workload(db, team=team, date_from=date_from, date_to=date_to)
-
-    # 3. Collaboration matrix with insights (M5)
-    collaboration = await get_collaboration(db, team=team, date_from=date_from, date_to=date_to)
-
-    # 4. CHANGES_REQUESTED reviews with body text + metadata (up to 60)
-    dev_query = select(Developer.id, Developer.display_name).where(Developer.is_active.is_(True))
-    if team:
-        dev_query = dev_query.where(Developer.team == team)
-    dev_result = await db.execute(dev_query)
-    dev_rows = dev_result.all()
-    dev_ids = [r.id for r in dev_rows]
-    dev_names = {r.id: r.display_name for r in dev_rows}
-
-    cr_reviews = []
-    if dev_ids:
-        cr_result = (
-            await db.execute(
-                select(PRReview, PullRequest.author_id, PullRequest.title, PullRequest.number)
-                .join(PullRequest, PRReview.pr_id == PullRequest.id)
-                .where(
-                    PRReview.state == "CHANGES_REQUESTED",
-                    PRReview.reviewer_id.in_(dev_ids),
-                    PRReview.submitted_at >= date_from,
-                    PRReview.submitted_at <= date_to,
-                )
-                .order_by(PRReview.submitted_at.desc())
-                .limit(60)
-            )
-        ).all()
-        for review, author_id, pr_title, pr_number in cr_result:
-            cr_reviews.append({
-                "reviewer": dev_names.get(review.reviewer_id, "external"),
-                "author": dev_names.get(author_id, "external"),
-                "pr": f"#{pr_number} {pr_title}",
-                "body": _truncate(review.body),
-                "submitted_at": review.submitted_at.isoformat() if review.submitted_at else None,
-            })
-
-    # 5. High back-and-forth issue threads (3+ comments between 2 people)
-    heated_threads = []
-    if dev_ids:
-        # Find issues with 3+ comments from tracked devs
-        dev_usernames_result = await db.execute(
-            select(Developer.id, Developer.github_username).where(Developer.id.in_(dev_ids))
-        )
-        dev_username_map = {r.github_username: r.id for r in dev_usernames_result.all()}
-        dev_name_by_username = {}
-        for uname, did in dev_username_map.items():
-            dev_name_by_username[uname] = dev_names.get(did, uname)
-
-        # Get issues with many comments in the period
-        busy_issues_result = await db.execute(
-            select(IssueComment.issue_id, func.count().label("cnt"))
-            .where(
-                IssueComment.created_at >= date_from,
-                IssueComment.created_at <= date_to,
-            )
-            .group_by(IssueComment.issue_id)
-            .having(func.count() >= 3)
-            .order_by(func.count().desc())
-            .limit(20)
-        )
-        busy_issue_ids = [r.issue_id for r in busy_issues_result.all()]
-
-        for issue_id in busy_issue_ids:
-            # Fetch full comment thread in chronological order
-            issue = await db.get(Issue, issue_id)
-            if not issue:
-                continue
-
-            comments_result = await db.execute(
-                select(IssueComment)
-                .where(IssueComment.issue_id == issue_id)
-                .order_by(IssueComment.created_at.asc())
-            )
-            comments = list(comments_result.scalars().all())
-
-            # Check if there's back-and-forth between 2 people
-            authors_in_thread = set()
-            for c in comments:
-                if c.author_github_username:
-                    authors_in_thread.add(c.author_github_username)
-
-            # Only include threads involving tracked devs with back-and-forth
-            tracked_in_thread = authors_in_thread & set(dev_username_map.keys())
-            if len(tracked_in_thread) < 2:
-                continue
-
-            # Build chronological dialogue
-            dialogue = []
-            prev_time = None
-            for c in comments:
-                gap_hours = None
-                if prev_time and c.created_at:
-                    gap_hours = round((c.created_at - prev_time).total_seconds() / 3600, 1)
-                if c.created_at:
-                    prev_time = c.created_at
-
-                dialogue.append({
-                    "author": dev_name_by_username.get(
-                        c.author_github_username, c.author_github_username or "unknown"
-                    ),
-                    "body": _truncate(c.body),
-                    "timestamp": c.created_at.isoformat() if c.created_at else None,
-                    "hours_since_previous": gap_hours,
-                })
-
-            heated_threads.append({
-                "issue": f"#{issue.number} {issue.title}",
-                "comment_count": len(comments),
-                "participants": [
-                    dev_name_by_username.get(u, u) for u in tracked_in_thread
-                ],
-                "dialogue": dialogue,
-            })
-
-    # 6. Goal progress across team (M6) — batch query instead of per-dev
-    team_goals = []
-    if dev_ids:
-        all_goals_result = await db.execute(
-            select(DeveloperGoal).where(
-                DeveloperGoal.developer_id.in_(dev_ids),
-                DeveloperGoal.status == "active",
-            )
-        )
-        all_goals = list(all_goals_result.scalars().all())
-        for goal in all_goals:
-            # Compute current value for each goal
-            from app.services.goals import _get_metric_value
-            current_value = await _get_metric_value(
-                db, goal.developer_id, goal.metric_key, date_from, date_to
-            )
-            team_goals.append({
-                "developer": dev_names.get(goal.developer_id, "unknown"),
-                "title": goal.title,
-                "metric_key": goal.metric_key,
-                "target_value": goal.target_value,
-                "current_value": round(current_value, 2),
-                "target_direction": goal.target_direction,
-                "status": goal.status,
-            })
-
-    # Build context document
-    context = {
-        "team": team or "all",
-        "period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
-        "team_stats": team_stats.model_dump(),
-        "benchmarks": {
-            "sample_size": benchmarks.sample_size,
-            "metrics": {k: v.model_dump() for k, v in benchmarks.metrics.items()},
-        } if benchmarks.metrics else None,
-        "workload": {
-            "developers": [d.model_dump() for d in workload.developers],
-            "alerts": [a.model_dump() for a in workload.alerts],
-        },
-        "collaboration": {
-            "insights": collaboration.insights.model_dump(),
-            "pair_count": len(collaboration.matrix),
-        },
-        "changes_requested_reviews": cr_reviews,
-        "heated_threads": heated_threads,
-        "team_goals": team_goals,
-    }
-
-    scope_id = team or "all"
-    input_summary = (
-        f"Team health for '{scope_id}': {team_stats.developer_count} devs, "
-        f"{team_stats.total_prs} PRs, {len(cr_reviews)} CR reviews, "
-        f"{len(heated_threads)} heated threads, {len(workload.alerts)} workload alerts"
+    context, input_summary = await build_team_health_context(
+        db, team, date_from, date_to, repo_ids=repo_ids,
     )
 
     return await _call_claude_and_store(

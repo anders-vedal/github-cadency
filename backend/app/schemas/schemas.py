@@ -918,6 +918,7 @@ class AIAnalyzeRequest(BaseModel):
     scope_id: str
     date_from: datetime
     date_to: datetime
+    repo_ids: list[int] | None = None
 
 
 class AIAnalysisResponse(BaseModel):
@@ -948,6 +949,7 @@ class OneOnOnePrepRequest(BaseModel):
     developer_id: int
     date_from: datetime
     date_to: datetime
+    repo_ids: list[int] | None = None
 
 
 # --- Team Health Check schemas (M8) ---
@@ -957,6 +959,61 @@ class TeamHealthRequest(BaseModel):
     team: str | None = None
     date_from: datetime
     date_to: datetime
+    repo_ids: list[int] | None = None
+
+
+# --- AI Analysis Schedule schemas (AW-02) ---
+
+
+class AIScheduleCreate(BaseModel):
+    name: str = Field(max_length=255)
+    analysis_type: str
+    general_type: str | None = None
+    scope_type: str
+    scope_id: str = Field(max_length=255)
+    repo_ids: list[int] | None = None
+    time_range_days: int = Field(default=30, ge=1, le=365)
+    frequency: str  # daily, weekly, biweekly, monthly
+    day_of_week: int | None = Field(default=None, ge=0, le=6)
+    hour: int = Field(default=8, ge=0, le=23)
+    minute: int = Field(default=0, ge=0, le=59)
+
+
+class AIScheduleUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    is_enabled: bool | None = None
+    repo_ids: list[int] | None = None
+    time_range_days: int | None = Field(default=None, ge=1, le=365)
+    frequency: str | None = None
+    day_of_week: int | None = Field(default=None, ge=0, le=6)
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+    # analysis_type/scope not updatable — delete and recreate
+
+
+class AIScheduleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    analysis_type: str
+    general_type: str | None
+    scope_type: str
+    scope_id: str
+    repo_ids: list[int] | None
+    time_range_days: int
+    frequency: str
+    day_of_week: int | None
+    hour: int
+    minute: int
+    is_enabled: bool
+    last_run_at: datetime | None
+    last_run_analysis_id: int | None
+    last_run_status: str | None
+    created_by: str | None
+    created_at: datetime
+    updated_at: datetime
+    next_run_description: str | None = None
 
 
 # --- PR Risk Scoring schemas (P3-05) ---
@@ -1200,6 +1257,10 @@ class AICostEstimate(BaseModel):
     estimated_output_tokens: int = 0
     estimated_cost_usd: float = 0.0
     data_items: int = 0
+    character_count: int = 0
+    system_prompt_tokens: int = 0
+    remaining_budget_tokens: int = 0
+    would_exceed_budget: bool = False
     note: str = ""
 
 

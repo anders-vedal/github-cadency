@@ -21,7 +21,7 @@ configure_logging(
 
 from app.api import ai_analysis, developers, goals, logs, notifications, oauth, relationships, roles, slack, stats, sync, teams, webhooks, work_categories  # noqa: E402
 from app.models.database import AsyncSessionLocal  # noqa: E402
-from app.models.models import NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
+from app.models.models import AIAnalysisSchedule, NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
 from app.services.github_sync import run_sync  # noqa: E402
 
 logger = get_logger(__name__)
@@ -95,6 +95,97 @@ async def scheduled_sync(sync_type: str) -> None:
 
     scope = f"All tracked repos · {'nightly full resync' if sync_type == 'full' else 'incremental'}"
     await run_sync(sync_type, triggered_by="scheduled", sync_scope=scope)
+
+
+def register_schedule_job(scheduler: AsyncIOScheduler, schedule: AIAnalysisSchedule) -> None:
+    """Register (or re-register) an APScheduler job for an AI analysis schedule."""
+    job_id = f"ai_schedule_{schedule.id}"
+
+    # Remove existing job with same ID (ignore if not found)
+    try:
+        scheduler.remove_job(job_id)
+    except Exception:
+        pass
+
+    if not schedule.is_enabled:
+        return
+
+    if schedule.frequency == "daily":
+        scheduler.add_job(
+            scheduled_ai_analysis,
+            "cron",
+            args=[schedule.id],
+            hour=schedule.hour,
+            minute=schedule.minute,
+            id=job_id,
+            misfire_grace_time=None,
+        )
+    elif schedule.frequency == "weekly":
+        scheduler.add_job(
+            scheduled_ai_analysis,
+            "cron",
+            args=[schedule.id],
+            day_of_week=schedule.day_of_week,
+            hour=schedule.hour,
+            minute=schedule.minute,
+            id=job_id,
+            misfire_grace_time=None,
+        )
+    elif schedule.frequency == "biweekly":
+        scheduler.add_job(
+            scheduled_ai_analysis,
+            "cron",
+            args=[schedule.id],
+            week="*/2",
+            day_of_week=schedule.day_of_week,
+            hour=schedule.hour,
+            minute=schedule.minute,
+            id=job_id,
+            misfire_grace_time=None,
+        )
+    elif schedule.frequency == "monthly":
+        scheduler.add_job(
+            scheduled_ai_analysis,
+            "cron",
+            args=[schedule.id],
+            day=1,
+            hour=schedule.hour,
+            minute=schedule.minute,
+            id=job_id,
+            misfire_grace_time=None,
+        )
+
+    logger.info(
+        "Registered AI schedule job",
+        job_id=job_id,
+        frequency=schedule.frequency,
+        event_type="ai.schedule",
+    )
+
+
+async def scheduled_ai_analysis(schedule_id: int) -> None:
+    """Wrapper called by APScheduler for AI analysis schedule execution."""
+    from app.services.ai_schedules import run_scheduled_analysis
+
+    async with AsyncSessionLocal() as db:
+        schedule = await db.get(AIAnalysisSchedule, schedule_id)
+        if not schedule or not schedule.is_enabled:
+            logger.info(
+                "Skipping AI schedule — not found or disabled",
+                schedule_id=schedule_id,
+                event_type="ai.schedule",
+            )
+            return
+
+        try:
+            await run_scheduled_analysis(db, schedule)
+        except Exception as e:
+            logger.error(
+                "Scheduled AI analysis failed",
+                schedule_id=schedule_id,
+                error=str(e),
+                event_type="ai.schedule",
+            )
 
 
 async def _recover_orphaned_syncs() -> None:
@@ -279,6 +370,24 @@ async def lifespan(app: FastAPI):
         )
     else:
         logger.info("Scheduler started: auto-sync is disabled", event_type="system.startup")
+
+    # Register AI analysis schedules
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(AIAnalysisSchedule).where(AIAnalysisSchedule.is_enabled.is_(True))
+            )
+            ai_schedules = result.scalars().all()
+            for ai_sched in ai_schedules:
+                register_schedule_job(scheduler, ai_sched)
+            if ai_schedules:
+                logger.info(
+                    f"Registered {len(ai_schedules)} AI analysis schedules",
+                    count=len(ai_schedules),
+                    event_type="ai.schedule",
+                )
+    except Exception as e:
+        logger.warning("Could not load AI analysis schedules", error=str(e), event_type="ai.schedule")
 
     yield
 

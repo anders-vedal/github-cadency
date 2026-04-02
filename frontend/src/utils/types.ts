@@ -337,19 +337,24 @@ export interface AIAnalyzeRequest {
   scope_id: string
   date_from: string
   date_to: string
+  repo_ids?: number[]
 }
 
 export interface OneOnOnePrepRequest {
   developer_id: number
   date_from: string
   date_to: string
+  repo_ids?: number[]
 }
 
 export interface TeamHealthRequest {
   team?: string
   date_from: string
   date_to: string
+  repo_ids?: number[]
 }
+
+export type AnalysisWizardType = 'communication' | 'conflict' | 'sentiment' | 'one_on_one_prep' | 'team_health'
 
 // --- Review Quality (M1) ---
 
@@ -976,7 +981,59 @@ export interface AICostEstimate {
   estimated_output_tokens: number
   estimated_cost_usd: number
   data_items: number
+  character_count: number
+  system_prompt_tokens: number
+  remaining_budget_tokens: number
+  would_exceed_budget: boolean
   note: string
+}
+
+export interface AISchedule {
+  id: number
+  name: string
+  analysis_type: string
+  general_type: string | null
+  scope_type: string
+  scope_id: string
+  repo_ids: number[] | null
+  time_range_days: number
+  frequency: string
+  day_of_week: number | null
+  hour: number
+  minute: number
+  is_enabled: boolean
+  last_run_at: string | null
+  last_run_analysis_id: number | null
+  last_run_status: string | null
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  next_run_description: string | null
+}
+
+export interface AIScheduleCreate {
+  name: string
+  analysis_type: string
+  general_type?: string
+  scope_type: string
+  scope_id: string
+  repo_ids?: number[]
+  time_range_days?: number
+  frequency: string
+  day_of_week?: number
+  hour?: number
+  minute?: number
+}
+
+export interface AIScheduleUpdate {
+  name?: string
+  is_enabled?: boolean
+  repo_ids?: number[]
+  time_range_days?: number
+  frequency?: string
+  day_of_week?: number
+  hour?: number
+  minute?: number
 }
 
 // --- Developer Relationships ---

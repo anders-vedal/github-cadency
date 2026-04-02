@@ -21,6 +21,7 @@ const Repos = lazy(() => import('@/pages/Repos'))
 const SyncPage = lazy(() => import('@/pages/sync/SyncPage'))
 const SyncDetailPage = lazy(() => import('@/pages/sync/SyncDetailPage'))
 const AIAnalysis = lazy(() => import('@/pages/AIAnalysis'))
+const AIWizard = lazy(() => import('@/pages/ai/AIWizard'))
 const Goals = lazy(() => import('@/pages/Goals'))
 const WorkloadOverview = lazy(() => import('@/pages/insights/WorkloadOverview'))
 const CollaborationMatrix = lazy(() => import('@/pages/insights/CollaborationMatrix'))
@@ -160,6 +161,7 @@ function AppRoutes() {
                                 <Route path="/sync" element={<SyncPage />} />
                                 <Route path="/sync/:id" element={<SyncDetailPage />} />
                                 <Route path="/ai" element={<AIAnalysis />} />
+                                <Route path="/ai/new" element={<AIWizard />} />
                                 <Route path="/ai/settings" element={<AISettingsPage />} />
                                 <Route path="/slack" element={<SlackSettingsPage />} />
                                 <Route path="/work-categories" element={<WorkCategoriesPage />} />

@@ -1,8 +1,8 @@
-import { useParams } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import { useDeveloper, useActivitySummary, useUpdateDeveloper } from '@/hooks/useDevelopers'
 import { useDeveloperStats, useDeveloperTrends } from '@/hooks/useStats'
 import { useDateRange } from '@/hooks/useDateRange'
-import { useRunAnalysis, useRunOneOnOnePrep, useAIHistory } from '@/hooks/useAI'
+import { useAIHistory } from '@/hooks/useAI'
 import { useAuth } from '@/hooks/useAuth'
 import { useRoles } from '@/hooks/useRoles'
 import TeamCombobox from '@/components/TeamCombobox'
@@ -30,8 +30,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
-  DialogClose,
 } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import StatCard from '@/components/StatCard'
@@ -437,14 +435,9 @@ export default function DeveloperDetail() {
   const { data: stats } = useDeveloperStats(devId, dateFrom, dateTo)
   const { data: trends } = useDeveloperTrends(devId)
   const { data: aiHistory } = useAIHistory()
-  const runAnalysis = useRunAnalysis()
-  const runOneOnOnePrep = useRunOneOnOnePrep()
   const { user, isAdmin } = useAuth()
   const { data: goals } = useGoals(devId)
   const updateSelfGoal = useUpdateSelfGoal()
-  const [analysisType, setAnalysisType] = useState<'communication' | 'sentiment'>('communication')
-  const [analyzeOpen, setAnalyzeOpen] = useState(false)
-  const [prepOpen, setPrepOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [deactivateOpen, setDeactivateOpen] = useState(false)
 
@@ -776,101 +769,16 @@ export default function DeveloperDetail() {
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">AI Analysis</h2>
           <div className="flex gap-2">
-            {/* Generate 1:1 Prep Brief */}
-            <Dialog open={prepOpen} onOpenChange={setPrepOpen}>
-              <DialogTrigger>
-                <Button>Generate 1:1 Prep Brief</Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Generate 1:1 Prep Brief</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4">
-                  <p className="text-sm">
-                    Generate an AI-powered 1:1 meeting brief for{' '}
-                    <span className="font-medium">{dev.display_name}</span>.
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    Date range: {dateFrom} to {dateTo}
-                  </p>
-                  <div className="flex justify-end gap-2">
-                    <DialogClose>
-                      <Button variant="outline">Cancel</Button>
-                    </DialogClose>
-                    <Button
-                      disabled={runOneOnOnePrep.isPending}
-                      onClick={() => {
-                        runOneOnOnePrep.mutate(
-                          {
-                            data: {
-                              developer_id: devId,
-                              date_from: new Date(dateFrom).toISOString(),
-                              date_to: new Date(dateTo).toISOString(),
-                            },
-                          },
-                          { onSuccess: () => setPrepOpen(false) }
-                        )
-                      }}
-                    >
-                      {runOneOnOnePrep.isPending ? 'Generating...' : 'Generate'}
-                    </Button>
-                  </div>
-                </div>
-              </DialogContent>
-            </Dialog>
-
-            {/* Run generic AI Analysis */}
-            <Dialog open={analyzeOpen} onOpenChange={setAnalyzeOpen}>
-              <DialogTrigger>
-                <Button variant="outline">Run AI Analysis</Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Run Analysis</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium">Analysis Type</label>
-                    <Select value={analysisType} onValueChange={(v) => setAnalysisType(v as 'communication' | 'sentiment')}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="communication">Communication</SelectItem>
-                        <SelectItem value="sentiment">Sentiment</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Date range: {dateFrom} to {dateTo}
-                  </p>
-                  <div className="flex justify-end gap-2">
-                    <DialogClose>
-                      <Button variant="outline">Cancel</Button>
-                    </DialogClose>
-                    <Button
-                      disabled={runAnalysis.isPending}
-                      onClick={() => {
-                        runAnalysis.mutate(
-                          {
-                            data: {
-                              analysis_type: analysisType,
-                              scope_type: 'developer',
-                              scope_id: String(devId),
-                              date_from: dateFrom,
-                              date_to: dateTo,
-                            },
-                          },
-                          { onSuccess: () => setAnalyzeOpen(false) }
-                        )
-                      }}
-                    >
-                      {runAnalysis.isPending ? 'Running...' : 'Run'}
-                    </Button>
-                  </div>
-                </div>
-              </DialogContent>
-            </Dialog>
+            <Button asChild>
+              <Link to={`/admin/ai/new?type=one_on_one_prep&developer_id=${devId}`}>
+                Generate 1:1 Prep Brief
+              </Link>
+            </Button>
+            <Button variant="outline" asChild>
+              <Link to={`/admin/ai/new?type=communication&developer_id=${devId}`}>
+                Run AI Analysis
+              </Link>
+            </Button>
           </div>
         </div>
 

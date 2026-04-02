@@ -518,6 +518,47 @@ class AISettings(Base):
     updated_by: Mapped[str | None] = mapped_column(String(255))
 
 
+class AIAnalysisSchedule(Base):
+    __tablename__ = "ai_analysis_schedules"
+    __table_args__ = (
+        Index("ix_ai_analysis_schedules_is_enabled", "is_enabled"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Analysis config
+    analysis_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # For general analysis: 'communication', 'conflict', 'sentiment'
+    # For others: stored in analysis_type directly ('one_on_one_prep', 'team_health')
+    general_type: Mapped[str | None] = mapped_column(String(50))
+    scope_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    repo_ids: Mapped[list | None] = mapped_column(JSONB)
+    time_range_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    # Schedule config
+    frequency: Mapped[str] = mapped_column(String(30), nullable=False)
+    # 'daily', 'weekly', 'biweekly', 'monthly'
+    day_of_week: Mapped[int | None] = mapped_column(Integer)
+    # 0=Monday..6=Sunday, used for weekly/biweekly
+    hour: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    minute: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # State
+    is_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_analysis_id: Mapped[int | None] = mapped_column(Integer)
+    last_run_status: Mapped[str | None] = mapped_column(String(30))
+    # 'success', 'failed', 'budget_exceeded', 'feature_disabled'
+    # Audit
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow,
+        server_default=func.now()
+    )
+
+
 class AIUsageLog(Base):
     __tablename__ = "ai_usage_log"
     __table_args__ = (

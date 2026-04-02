@@ -47,7 +47,7 @@ backend/app/
 │   ├── roles.py                 # Role definition CRUD (admin-configurable roles + contribution categories)
 │   ├── work_categories.py       # Work category + rule CRUD, reclassify, suggestions scan, bulk rule create (admin-configurable)
 │   ├── webhooks.py              # GitHub webhook receiver (HMAC-verified)
-│   ├── ai_analysis.py           # AI analysis + 1:1 prep + team health
+│   ├── ai_analysis.py           # AI analysis + 1:1 prep + team health + schedule CRUD/run
 │   ├── slack.py                 # Slack integration config, user settings, test, notification history
 │   ├── notifications.py         # Notification center: list, read, dismiss, config, evaluate (admin-only)
 │   └── logs.py                  # Frontend log ingestion (POST /logs/ingest, no auth)
@@ -65,10 +65,11 @@ backend/app/
 │   ├── roles.py          # Role definitions CRUD, category lookup, role validation
 │   ├── goals.py          # Goal CRUD, metric computation, auto-achievement
 │   ├── risk.py           # PR risk scoring: per-PR assessment, team risk summary
-│   ├── ai_analysis.py    # Claude API integration, 1:1 prep briefs, team health checks
+│   ├── ai_analysis.py    # Claude API integration, context builders (dry-run), 1:1 prep briefs, team health checks
+│   ├── ai_schedules.py   # AI analysis schedule CRUD, execution, APScheduler registration
 │   ├── work_categories.py # Configurable work categories: CRUD, classification rules, reclassify, GitHub data suggestions scan, bulk rule create
 │   ├── work_category.py  # Work allocation: aggregation, drill-down, recategorization, AI batch
-│   ├── ai_settings.py    # AI feature toggles, budget, pricing, cooldown, usage tracking
+│   ├── ai_settings.py    # AI feature toggles, budget, pricing, cooldown, usage tracking, dry-run cost estimation
 │   ├── slack.py          # Slack notifications: config CRUD, DM/channel sending, scheduled jobs
 │   └── notifications.py  # Notification center: alert evaluation, materialization, read/dismiss, config CRUD
 ├── logging/
@@ -87,6 +88,7 @@ frontend/src/
 ├── pages/            # Route components (Dashboard, TeamRegistry, DeveloperDetail, Repos, etc.)
 │   ├── insights/     # Insights sub-pages (Workload, Collaboration, Benchmarks, IssueQuality, IssueLinkage, OrgChart, etc.)
 │   ├── sync/         # Sync wizard, progress, history, detail (SyncPage, SyncWizard, SyncDetailPage, SyncProgressView, etc.)
+│   ├── ai/           # AI analysis wizard (AIWizard + 4 step components: StepChooseType, StepConfigureScope, StepTimeRange, StepConfirm)
 │   └── settings/     # Settings pages (AISettings, SlackSettings, NotificationSettings)
 ├── components/
 │   ├── Layout.tsx    # Sticky header, top nav (Dashboard, Executive, Team, Insights, Goals, Admin dropdown), date range picker
@@ -103,14 +105,14 @@ frontend/src/
 │   ├── ai/           # AI result renderers (AnalysisResultRenderer, OneOnOnePrepView, etc.)
 │   ├── charts/       # TrendChart, PercentileBar, ReviewQualityDonut, GoalSparkline, DeploymentTimeline
 │   └── ui/           # shadcn/ui primitives
-├── hooks/            # TanStack Query hooks (useAuth, useDevelopers, useStats, useSync, useAI, useAISettings, useGoals, useDateRange, useRelationships, useRoles, useSlack, useNotifications)
+├── hooks/            # TanStack Query hooks (useAuth, useDevelopers, useStats, useSync, useAI, useAISettings, useAISchedules, useGoals, useDateRange, useRelationships, useRoles, useSlack, useNotifications)
 ├── utils/            # api.ts (apiFetch wrapper + ApiError class), types.ts (TS interfaces), categoryConfig.ts (CATEGORY_CONFIG/CATEGORY_ORDER), format.ts (timeAgo, formatDuration, formatDate shared utilities), logger.ts (structured frontend logger with batching + backend ingestion)
 └── lib/utils.ts      # cn() utility (clsx + tailwind-merge)
 ```
 
 **Import alias:** `@/` maps to `src/` (configured in vite.config.ts and tsconfig).
 
-## Database Schema (29 tables)
+## Database Schema (30 tables)
 
 | Table | Purpose |
 |-------|---------|
@@ -129,6 +131,7 @@ frontend/src/
 | `ai_analyses` | AI analysis results (JSONB) with split token tracking + cost |
 | `ai_settings` | Singleton (id=1) AI feature toggles, budget, pricing config |
 | `ai_usage_log` | Token usage tracking for work categorization AI calls |
+| `ai_analysis_schedules` | Recurring AI analysis schedules: analysis type, scope, repo filter, frequency (daily/weekly/biweekly/monthly), APScheduler integration, last run status |
 | `deployments` | DORA deployment records from GitHub Actions workflow runs, with failure tracking (is_failure, failure_detected_via, recovery linkage) for CFR/MTTR |
 | `developer_goals` | Goal tracking with metric targets + `created_by` (self/admin) |
 | `developer_relationships` | Org hierarchy: reports_to, tech_lead_of, team_lead_of (generic relationship table) |
@@ -255,6 +258,11 @@ python -m pytest tests/unit/        # unit tests only
 - **Workload score:** `total_load = open_authored + open_reviewing + open_issues`. Thresholds: low(0), balanced(1-5), high(6-12), overloaded(>12)
 - **PR risk scoring:** Pure `compute_pr_risk()` in `services/risk.py`, 10 weighted factors, score 0-1. Levels: low/medium/high/critical
 - **AI guards:** All AI call sites check feature toggles → budget → cooldown before calling Claude. `ai_settings` singleton controls everything. Services raise `AIFeatureDisabledError` (→ 403) and `AIBudgetExceededError` (→ 429) from `services/exceptions.py`; API routes catch and convert to HTTP responses. Claude client uses `max_retries=3` and `timeout=120s`.
+- **AI context builders:** `build_one_on_one_context()` and `build_team_health_context()` in `ai_analysis.py` — extracted data-gathering logic that builds the full context dict without calling Claude. Used both by the run functions and by `estimate_analysis_cost()` for accurate dry-run cost estimation. Accept optional `repo_ids` parameter for repo filtering.
+- **AI cost estimation (dry-run):** `estimate_analysis_cost()` in `ai_settings.py` builds actual contexts for `one_on_one_prep` and `team_health` (not heuristics), measures serialized character count, derives token estimates via `chars // 4 + system_prompt_tokens`. Returns `character_count`, `system_prompt_tokens`, `remaining_budget_tokens`, `would_exceed_budget` for the frontend confirm step.
+- **AI repo filtering:** All data-gathering functions (`_gather_developer_texts`, `_gather_team_texts`, `_gather_scope_texts`, `build_one_on_one_context`, `build_team_health_context`) accept optional `repo_ids: list[int]`. When provided, filters PR/review/issue queries to selected repos. Propagated through `run_analysis`, `run_one_on_one_prep`, `run_team_health`, and `estimate_analysis_cost`.
+- **AI analysis schedules:** `ai_analysis_schedules` table stores multiple independent recurring analysis configurations. Each schedule has analysis type, scope, optional repo filter, `time_range_days`, frequency (daily/weekly/biweekly/monthly), day_of_week, hour, minute, is_enabled. CRUD via `services/ai_schedules.py`. APScheduler jobs registered on startup and on CRUD operations via `register_schedule_job()` in `main.py`. `run_scheduled_analysis()` computes date range from `time_range_days`, calls the appropriate run function with `triggered_by="scheduled"`, and updates `last_run_at/status/analysis_id`.
+- **AI schedules API:** `GET /ai/schedules` (list), `POST /ai/schedules` (201, create + register APScheduler job), `PATCH /ai/schedules/{id}` (update + re-register), `DELETE /ai/schedules/{id}` (204, remove + unregister), `POST /ai/schedules/{id}/run` (201, manual trigger). All admin-only.
 - **Work categorization:** Admin-configurable via `work_categories` + `work_category_rules` tables. Classification cascade: label rules → issue type rules → title regex/prefix rules → cross-reference (PRs inherit from linked issues) → AI (optional) → "unknown". Rules evaluated by priority (lower = first). Categories are extensible (e.g., add "epic", "question", "security"). Both categories and rules have optional `description` fields for admin documentation. `exclude_from_stats` flag on categories removes items from metrics (Phase 2 for full stats integration, see `.claude/tasks/work-categories/phase2-stats-exclusion.md`). Classification persisted at sync time; "Reclassify All" button for rule changes. `work_category_source` tracks provenance: `label`, `title`, `prefix`, `issue_type`, `ai`, `manual`, `cross_ref`. Manual overrides (`source="manual"`) are authoritative and never overwritten. `classify_work_item_with_rules()` is a pure function accepting pre-loaded rules + optional `issue_type` parameter. `issues.issue_type` stores the GitHub issue type name (e.g., "Bug", "Epic", "Feature", "Task") captured at sync time from the REST API `type.name` field. Legacy items with NULL `work_category` fall back to rule-based classification at query time.
 - **Work allocation items drill-down:** `GET /stats/work-allocation/items?category=&type=&page=&page_size=` returns paginated PRs/issues by computed category with repo name, author, labels, and category source. `PATCH /stats/work-allocation/items/{type}/{id}/category` recategorizes an item (sets `work_category_source="manual"`). Both endpoints use `get_current_user` (any authenticated user).
 - **Sync architecture:** `SyncContext` dataclass threads db/client/sync_event/logger through the sync chain. Per-repo `db.commit()` after each repo + batch commits every 50 PRs within large repos. JSONB columns mutated via `_append_jsonb()` helper (reassigns to trigger SQLAlchemy change detection). Rollback+merge pattern on per-repo failure preserves log_summary. Structured errors via `make_sync_error()`. Retry with exponential backoff on 502/503/504. PostgreSQL advisory lock (`pg_advisory_lock`) prevents TOCTOU race on sync start (SQLite fallback for tests).
@@ -300,7 +308,7 @@ python -m pytest tests/unit/        # unit tests only
 - **Error/loading:** `ErrorCard` + per-section `ErrorBoundary` for errors (each top-level page and sidebar section wrapped individually, global boundary as fallback). `StatCardSkeleton` + `TableSkeleton` for loading.
 - **Code splitting:** All page components lazy-loaded via `React.lazy()` with `Suspense` fallback (`PageSkeleton`). Layout, SidebarLayout, and shared hooks eagerly loaded.
 - **AI result rendering:** `AnalysisResultRenderer` switches on `analysis_type` → structured view. Colors: green (positive), amber (attention), red (concern).
-- **Nav structure:** Top nav has 4 links + Admin dropdown. Insights (`/insights/*`) and Admin (`/admin/*`) sections render with `SidebarLayout` (sticky left sidebar + content). Admin group: Team (`/admin/team`), Repos (`/admin/repos`), Sync (`/admin/sync`), AI Analysis (`/admin/ai`), AI Settings (`/admin/ai/settings`), Slack (`/admin/slack`), Work Categories (`/admin/work-categories`), Notifications (`/admin/notifications`). `isNavActive()` uses prefix matching for section links. Bare section URLs redirect to first sub-page. `/team` redirects to `/admin/team`; `/team/:id` (developer detail) remains top-level.
+- **Nav structure:** Top nav has 4 links + Admin dropdown. Insights (`/insights/*`) and Admin (`/admin/*`) sections render with `SidebarLayout` (sticky left sidebar + content). Admin group: Team (`/admin/team`), Repos (`/admin/repos`), Sync (`/admin/sync`), AI Analysis (`/admin/ai`), AI Wizard (`/admin/ai/new`), AI Settings (`/admin/ai/settings`), Slack (`/admin/slack`), Work Categories (`/admin/work-categories`), Notifications (`/admin/notifications`). `isNavActive()` uses prefix matching for section links. Bare section URLs redirect to first sub-page. `/team` redirects to `/admin/team`; `/team/:id` (developer detail) remains top-level.
 - **Contributor sync progress:** Team Registry page polls `useSyncStatus()` and shows a progress banner when `sync_type === "contributors"` is active. Completion banner (success/failure) fades after 10s via `useRef` transition detection. Developer list auto-refreshes on sync completion. Button disabled when any sync is active.
 - **Developer deactivation UI:** Team Registry has Active/Inactive toggle tabs. Active tab: Edit + Deactivate buttons per row. Deactivate opens `DeactivateDialog` which fetches `GET /developers/{id}/deactivation-impact` to show open PRs, issues, and branches before confirming. Inactive tab: dimmed rows with Reactivate button. Creating a developer with an inactive username triggers structured 409 caught via `ApiError` with reactivation prompt. `DeveloperDetail` shows "Inactive" badge when `is_active=false`.
 - **Activity summary on DeveloperDetail:** `ActivitySummaryCard` renders below the profile card (visible to own profile or admin). Shows lifetime PRs authored/merged/open, reviews given, issues created/assigned, repos touched, active since / last active dates, and a stacked color bar of work category breakdown (feature/bugfix/tech_debt/ops/unknown) with tooltips and legend. Uses `useActivitySummary` hook (60s staleTime).
@@ -316,7 +324,10 @@ python -m pytest tests/unit/        # unit tests only
 - **Org Chart page:** `/insights/org-chart` — tree visualization from `useOrgTree`. Expandable nodes, "not in hierarchy" section. Added to Insights sidebar.
 - **Issue Linkage page:** `/insights/issue-linkage` — admin-only page showing per-developer PR-to-issue linkage rates. Summary stat cards (total PRs, linked PRs, team avg, attention count), amber "Attention Needed" callout card listing developers below threshold (<20%), sortable developer table with linkage rate bars. Team filter dropdown. `useIssueLinkageByDeveloper` hook. `DeveloperDetail` shows "Issue Linkage" StatCard in stats grid.
 - **AI settings page:** `/admin/ai/settings` admin-only page with master switch, per-feature toggle cards, budget config, pricing config, usage stacked area chart, cooldown setting. Auto-saves on change (debounced 500ms). `useAISettings` hook fetches settings, `useUpdateAISettings` patches.
-- **AI dedup banners:** When AI mutation returns `reused: true`, history items show a "cached" badge and a blue info banner with "Regenerate" button (`force=true`). Cost estimates shown in AI trigger dialogs via `useAICostEstimate`.
+- **AI analysis wizard:** `/admin/ai/new` — 4-step wizard (type → scope → time range → confirm) following the SyncWizard pattern (`useReducer`, step indicator, adaptive steps). Step 1: 5 info cards (communication, conflict, sentiment, 1:1 prep, team health) explaining what each reads and generates. Step 2: adaptive scope selection (developer/team/repo select based on type). Step 3: time range radio cards + collapsible repo filter. Step 4: summary + accurate dry-run cost estimate (character count, token estimate, budget progress bar, `would_exceed_budget` warning with override checkbox) + "Run Analysis" and "Save as Schedule" CTAs. Schedule config expands inline (name, frequency, day, time). URL pre-fill: `?type=one_on_one_prep&developer_id=123` skips to step 2 with developer pre-selected (waits for developers data before setting `didPrefill`). `?schedule=123` loads existing schedule for editing.
+- **AI analysis landing page:** `/admin/ai` — tabs: History (unified list of all analysis types with type filter dropdown, expandable cards with `AnalysisResultRenderer`, regenerate support) and Schedules (table with name, type, scope, frequency, last run status badge, enable/disable `Switch`, run-now/edit/delete actions). "New Analysis" button links to wizard.
+- **AI on DeveloperDetail:** "Generate 1:1 Prep Brief" and "Run AI Analysis" buttons are `Link` components to `/admin/ai/new?type=...&developer_id=...` — no more inline dialogs. History list below shows past analyses for the developer.
+- **AI dedup banners:** When AI mutation returns `reused: true`, history items show a "cached" badge and a blue info banner with "Regenerate" button (`force=true`).
 - **AI budget warning:** AIAnalysis page shows amber banner when `budget_pct_used >= budget_warning_threshold` with link to AI Settings. Investment page checks `feature_work_categorization` before toggling AI classify.
 - **Slack settings page:** `/admin/slack` — admin-only page with connection status banner, bot token input (masked), default channel, master toggle, per-notification-type toggle cards, threshold config (stale PR days, risk score), schedule config (digest day/hour, stale check hour), notification history table. Auto-saves on change (debounced 500ms for text, immediate for toggles). Added to Admin sidebar and dropdown.
 - **Slack preferences on DeveloperDetail:** `SlackPreferencesSection` renders on own profile only. Shows Slack user ID input and per-notification-type toggles. Uses `useSlackUserSettings` / `useUpdateSlackUserSettings` hooks.

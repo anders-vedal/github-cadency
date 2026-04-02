@@ -1,29 +1,19 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAIHistory, useRunAnalysis, useRunOneOnOnePrep, useRunTeamHealth } from '@/hooks/useAI'
-import { useAISettings, useAICostEstimate } from '@/hooks/useAISettings'
-import { useDevelopers } from '@/hooks/useDevelopers'
-import { useRepos } from '@/hooks/useSync'
-import { useDateRange } from '@/hooks/useDateRange'
+import { useAISettings } from '@/hooks/useAISettings'
+import { useAISchedules, useUpdateAISchedule, useDeleteAISchedule, useRunAISchedule } from '@/hooks/useAISchedules'
 import ErrorCard from '@/components/ErrorCard'
 import TableSkeleton from '@/components/TableSkeleton'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-  DialogClose,
-} from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Skeleton } from '@/components/ui/skeleton'
 import AnalysisResultRenderer from '@/components/ai/AnalysisResultRenderer'
-import { AlertTriangle, Info, RefreshCw } from 'lucide-react'
-import type { AIAnalyzeRequest, AIAnalysis as AIAnalysisType } from '@/utils/types'
+import { AlertTriangle, Info, RefreshCw, Plus, Play, Pencil, Trash2 } from 'lucide-react'
+import type { AIAnalyzeRequest, AIAnalysis as AIAnalysisType, AISchedule } from '@/utils/types'
 import { timeAgo } from '@/utils/format'
 
 function ReusedBanner({ analysis, onRegenerate, isPending }: {
@@ -52,35 +42,6 @@ function ReusedBanner({ analysis, onRegenerate, isPending }: {
   )
 }
 
-function CostEstimateLine({ feature, scopeType, scopeId, dateFrom, dateTo }: {
-  feature: string
-  scopeType?: string
-  scopeId?: string
-  dateFrom?: string
-  dateTo?: string
-}) {
-  const estimate = useAICostEstimate()
-
-  // Fetch on mount
-  useEffect(() => {
-    estimate.mutate({ feature, scope_type: scopeType, scope_id: scopeId, date_from: dateFrom, date_to: dateTo })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feature, scopeType, scopeId, dateFrom, dateTo])
-
-  if (estimate.isPending) {
-    return <Skeleton className="h-4 w-48" />
-  }
-  if (estimate.data) {
-    const { estimated_input_tokens, estimated_output_tokens, estimated_cost_usd } = estimate.data
-    return (
-      <p className="text-xs text-muted-foreground">
-        Estimated: ~{(estimated_input_tokens + estimated_output_tokens).toLocaleString()} tokens (~${estimated_cost_usd.toFixed(4)})
-      </p>
-    )
-  }
-  return null
-}
-
 function HistoryList({
   items,
   emptyMessage,
@@ -95,7 +56,17 @@ function HistoryList({
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
   if (items.length === 0) {
-    return <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+    return (
+      <div className="py-8 text-center">
+        <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+        <Button asChild className="mt-3">
+          <Link to="/admin/ai/new">
+            <Plus className="mr-2 h-4 w-4" />
+            New Analysis
+          </Link>
+        </Button>
+      </div>
+    )
   }
 
   return (
@@ -109,6 +80,7 @@ function HistoryList({
             <CardTitle className="flex items-center gap-2 text-sm">
               <Badge variant="secondary">{a.analysis_type}</Badge>
               {a.reused && <Badge variant="outline" className="text-blue-600">cached</Badge>}
+              {a.triggered_by === 'scheduled' && <Badge variant="outline">scheduled</Badge>}
               {a.scope_type && a.scope_id && (
                 <span className="text-muted-foreground">
                   {a.scope_type}: {a.scope_id}
@@ -145,43 +117,145 @@ function HistoryList({
   )
 }
 
+const statusColors: Record<string, string> = {
+  success: 'text-green-600 border-green-500/30',
+  failed: 'text-red-600 border-red-500/30',
+  budget_exceeded: 'text-amber-600 border-amber-500/30',
+  feature_disabled: 'text-muted-foreground border-border',
+}
+
+function ScheduleRow({ schedule }: { schedule: AISchedule }) {
+  const updateSchedule = useUpdateAISchedule()
+  const deleteSchedule = useDeleteAISchedule()
+  const runSchedule = useRunAISchedule()
+
+  return (
+    <tr className="border-b">
+      <td className="px-3 py-2">
+        <Link to={`/admin/ai/new?schedule=${schedule.id}`} className="text-sm font-medium hover:underline">
+          {schedule.name}
+        </Link>
+      </td>
+      <td className="px-3 py-2">
+        <Badge variant="secondary" className="text-xs">
+          {schedule.general_type ?? schedule.analysis_type}
+        </Badge>
+      </td>
+      <td className="px-3 py-2 text-sm text-muted-foreground">
+        {schedule.scope_type}: {schedule.scope_id}
+      </td>
+      <td className="px-3 py-2 text-sm text-muted-foreground">
+        {schedule.next_run_description ?? schedule.frequency}
+      </td>
+      <td className="px-3 py-2 text-sm">
+        {schedule.last_run_at ? (
+          <span className="flex items-center gap-1">
+            <span className="text-muted-foreground">{timeAgo(schedule.last_run_at)}</span>
+            {schedule.last_run_status && (
+              <Badge variant="outline" className={`text-xs ${statusColors[schedule.last_run_status] ?? ''}`}>
+                {schedule.last_run_status}
+              </Badge>
+            )}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">Never run</span>
+        )}
+      </td>
+      <td className="px-3 py-2">
+        <Switch
+          checked={schedule.is_enabled}
+          onCheckedChange={(checked) =>
+            updateSchedule.mutate({ id: schedule.id, data: { is_enabled: checked } })
+          }
+        />
+      </td>
+      <td className="px-3 py-2">
+        <div className="flex gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            title="Run now"
+            disabled={runSchedule.isPending}
+            onClick={() => runSchedule.mutate(schedule.id)}
+          >
+            <Play className="h-3.5 w-3.5" />
+          </Button>
+          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Edit" asChild>
+            <Link to={`/admin/ai/new?schedule=${schedule.id}`}>
+              <Pencil className="h-3.5 w-3.5" />
+            </Link>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 text-red-600 hover:text-red-700"
+            title="Delete"
+            disabled={deleteSchedule.isPending}
+            onClick={() => {
+              if (confirm(`Delete schedule "${schedule.name}"?`)) {
+                deleteSchedule.mutate(schedule.id)
+              }
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
 export default function AIAnalysis() {
-  const { dateFrom, dateTo } = useDateRange()
   const { data: history, isLoading, isError, refetch } = useAIHistory()
+  const { data: aiSettings } = useAISettings()
+  const { data: schedules = [] } = useAISchedules()
   const runAnalysis = useRunAnalysis()
   const runOneOnOnePrep = useRunOneOnOnePrep()
   const runTeamHealth = useRunTeamHealth()
-  const { data: developers } = useDevelopers()
-  const { data: repos } = useRepos()
-  const { data: aiSettings } = useAISettings()
 
-  const [open, setOpen] = useState(false)
-  const [form, setForm] = useState<AIAnalyzeRequest>({
-    analysis_type: 'communication',
-    scope_type: 'developer',
-    scope_id: '',
-    date_from: '',
-    date_to: '',
-  })
+  const [typeFilter, setTypeFilter] = useState<string>('all')
 
-  // 1:1 prep state
-  const [prepDevId, setPrepDevId] = useState('')
+  const allHistory = history ?? []
+  const filteredHistory = typeFilter === 'all'
+    ? allHistory
+    : allHistory.filter((a) => a.analysis_type === typeFilter)
 
-  // Team health state
-  const [healthTeam, setHealthTeam] = useState('')
-
-  const teams = [...new Set((developers ?? []).map((d) => d.team).filter(Boolean))] as string[]
-
-  const generalTypes = ['communication', 'conflict', 'sentiment']
-  const generalHistory = (history ?? []).filter((a) => generalTypes.includes(a.analysis_type ?? ''))
-  const prepHistory = (history ?? []).filter((a) => a.analysis_type === 'one_on_one_prep')
-  const healthHistory = (history ?? []).filter((a) => a.analysis_type === 'team_health')
-
-  // Budget warning
   const showBudgetWarning =
     aiSettings &&
     aiSettings.budget_pct_used != null &&
     aiSettings.budget_pct_used >= aiSettings.budget_warning_threshold
+
+  const handleRegenerate = (item: AIAnalysisType) => {
+    if (!item.analysis_type || !item.date_from || !item.date_to) return
+
+    if (item.analysis_type === 'one_on_one_prep' && item.scope_id) {
+      runOneOnOnePrep.mutate({
+        data: { developer_id: Number(item.scope_id), date_from: item.date_from, date_to: item.date_to },
+        force: true,
+      })
+    } else if (item.analysis_type === 'team_health') {
+      runTeamHealth.mutate({
+        data: {
+          ...(item.scope_id && item.scope_id !== 'all' ? { team: item.scope_id } : {}),
+          date_from: item.date_from,
+          date_to: item.date_to,
+        },
+        force: true,
+      })
+    } else if (item.scope_type && item.scope_id) {
+      runAnalysis.mutate({
+        data: {
+          analysis_type: item.analysis_type as AIAnalyzeRequest['analysis_type'],
+          scope_type: item.scope_type as AIAnalyzeRequest['scope_type'],
+          scope_id: item.scope_id,
+          date_from: item.date_from,
+          date_to: item.date_to,
+        },
+        force: true,
+      })
+    }
+  }
 
   if (isError) {
     return <ErrorCard message="Could not load AI analysis history." onRetry={() => refetch()} />
@@ -197,15 +271,22 @@ export default function AIAnalysis() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-bold">AI Analysis</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">AI Analysis</h1>
+        <Button asChild>
+          <Link to="/admin/ai/new">
+            <Plus className="mr-2 h-4 w-4" />
+            New Analysis
+          </Link>
+        </Button>
+      </div>
 
-      {/* Budget warning */}
       {showBudgetWarning && (
         <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm">
           <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
           <span className="text-amber-700 dark:text-amber-400">
-            AI budget is {Math.round((aiSettings.budget_pct_used ?? 0) * 100)}% used this month
-            ({aiSettings.current_month_tokens.toLocaleString()} / {aiSettings.monthly_token_budget?.toLocaleString()} tokens).
+            AI budget is {Math.round((aiSettings!.budget_pct_used ?? 0) * 100)}% used this month
+            ({aiSettings!.current_month_tokens.toLocaleString()} / {aiSettings!.monthly_token_budget?.toLocaleString()} tokens).
           </span>
           <Link to="/admin/ai/settings" className="ml-auto text-xs font-medium text-amber-700 underline hover:no-underline dark:text-amber-400">
             Manage in AI Settings
@@ -213,267 +294,80 @@ export default function AIAnalysis() {
         </div>
       )}
 
-      <Tabs defaultValue="general">
+      <Tabs defaultValue="history">
         <TabsList>
-          <TabsTrigger value="general">General Analysis</TabsTrigger>
-          <TabsTrigger value="prep">1:1 Prep</TabsTrigger>
-          <TabsTrigger value="health">Team Health</TabsTrigger>
+          <TabsTrigger value="history">History</TabsTrigger>
+          <TabsTrigger value="schedules">
+            Schedules
+            {schedules.length > 0 && (
+              <Badge variant="secondary" className="ml-1.5 text-xs">{schedules.length}</Badge>
+            )}
+          </TabsTrigger>
         </TabsList>
 
-        {/* General Analysis Tab */}
-        <TabsContent value="general">
+        <TabsContent value="history">
           <div className="space-y-4">
             <div className="flex justify-end">
-              <Dialog open={open} onOpenChange={setOpen}>
-                <DialogTrigger>
-                  <Button>New Analysis</Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>Run AI Analysis</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-4">
-                    <div className="space-y-1.5">
-                      <label className="text-sm font-medium">Analysis Type</label>
-                      <Select value={form.analysis_type} onValueChange={(v) => setForm({ ...form, analysis_type: v as AIAnalyzeRequest['analysis_type'] })}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="communication">Communication</SelectItem>
-                          <SelectItem value="conflict">Conflict</SelectItem>
-                          <SelectItem value="sentiment">Sentiment</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-sm font-medium">Scope</label>
-                      <Select value={form.scope_type} onValueChange={(v) => setForm({ ...form, scope_type: v as AIAnalyzeRequest['scope_type'], scope_id: '' })}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="developer">Developer</SelectItem>
-                          <SelectItem value="team">Team</SelectItem>
-                          <SelectItem value="repo">Repository</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-sm font-medium">
-                        {form.scope_type === 'developer'
-                          ? 'Developer'
-                          : form.scope_type === 'team'
-                            ? 'Team'
-                            : 'Repository'}
-                      </label>
-                      <Select value={form.scope_id || undefined} onValueChange={(v) => v && setForm({ ...form, scope_id: v })}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select..." />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {form.scope_type === 'developer' &&
-                            (developers ?? []).map((d) => (
-                              <SelectItem key={d.id} value={String(d.id)}>
-                                {d.display_name} (@{d.github_username})
-                              </SelectItem>
-                            ))}
-                          {form.scope_type === 'team' &&
-                            teams.map((t) => (
-                              <SelectItem key={t} value={t}>{t}</SelectItem>
-                            ))}
-                          {form.scope_type === 'repo' &&
-                            (repos ?? []).map((r) => (
-                              <SelectItem key={r.id} value={String(r.id)}>
-                                {r.full_name}
-                              </SelectItem>
-                            ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <p className="text-sm text-muted-foreground">
-                      Date range: {dateFrom} to {dateTo}
-                    </p>
-
-                    {form.scope_id && (
-                      <CostEstimateLine
-                        feature="general_analysis"
-                        scopeType={form.scope_type}
-                        scopeId={form.scope_id}
-                        dateFrom={new Date(dateFrom).toISOString()}
-                        dateTo={new Date(dateTo).toISOString()}
-                      />
-                    )}
-
-                    <div className="flex justify-end gap-2">
-                      <DialogClose>
-                        <Button variant="outline">Cancel</Button>
-                      </DialogClose>
-                      <Button
-                        disabled={!form.scope_id || runAnalysis.isPending}
-                        onClick={() => {
-                          runAnalysis.mutate(
-                            {
-                              data: {
-                                ...form,
-                                date_from: new Date(dateFrom).toISOString(),
-                                date_to: new Date(dateTo).toISOString(),
-                              },
-                            },
-                            { onSuccess: () => setOpen(false) }
-                          )
-                        }}
-                      >
-                        {runAnalysis.isPending ? 'Running...' : 'Run Analysis'}
-                      </Button>
-                    </div>
-                  </div>
-                </DialogContent>
-              </Dialog>
+              <Select value={typeFilter} onValueChange={setTypeFilter}>
+                <SelectTrigger className="w-48">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All types</SelectItem>
+                  <SelectItem value="communication">Communication</SelectItem>
+                  <SelectItem value="conflict">Conflict</SelectItem>
+                  <SelectItem value="sentiment">Sentiment</SelectItem>
+                  <SelectItem value="one_on_one_prep">1:1 Prep</SelectItem>
+                  <SelectItem value="team_health">Team Health</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
-
             <HistoryList
-              items={generalHistory}
-              emptyMessage="No general analyses yet. Run one to get started."
-              onRegenerate={(item) => {
-                if (item.analysis_type && item.scope_type && item.scope_id && item.date_from && item.date_to) {
-                  runAnalysis.mutate({
-                    data: {
-                      analysis_type: item.analysis_type as AIAnalyzeRequest['analysis_type'],
-                      scope_type: item.scope_type as AIAnalyzeRequest['scope_type'],
-                      scope_id: item.scope_id,
-                      date_from: item.date_from,
-                      date_to: item.date_to,
-                    },
-                    force: true,
-                  })
-                }
-              }}
-              isRegenerating={runAnalysis.isPending}
+              items={filteredHistory}
+              emptyMessage="No analyses yet. Run your first analysis to see results here."
+              onRegenerate={handleRegenerate}
+              isRegenerating={runAnalysis.isPending || runOneOnOnePrep.isPending || runTeamHealth.isPending}
             />
           </div>
         </TabsContent>
 
-        {/* 1:1 Prep Tab */}
-        <TabsContent value="prep">
-          <div className="space-y-4">
+        <TabsContent value="schedules">
+          {schedules.length === 0 ? (
+            <div className="py-8 text-center">
+              <p className="text-sm text-muted-foreground">
+                No scheduled analyses. Create one from the New Analysis wizard.
+              </p>
+              <Button asChild className="mt-3">
+                <Link to="/admin/ai/new">
+                  <Plus className="mr-2 h-4 w-4" />
+                  New Analysis
+                </Link>
+              </Button>
+            </div>
+          ) : (
             <Card>
-              <CardContent className="flex flex-wrap items-end gap-4 pt-4">
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Developer</label>
-                  <Select value={prepDevId || undefined} onValueChange={(v) => v && setPrepDevId(v)}>
-                    <SelectTrigger className="min-w-[200px]">
-                      <SelectValue placeholder="Select developer..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(developers ?? []).map((d) => (
-                        <SelectItem key={d.id} value={String(d.id)}>
-                          {d.display_name} (@{d.github_username})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="text-sm text-muted-foreground">
-                  {dateFrom} to {dateTo}
-                </div>
-                <Button
-                  disabled={!prepDevId || runOneOnOnePrep.isPending}
-                  onClick={() => {
-                    runOneOnOnePrep.mutate({
-                      data: {
-                        developer_id: Number(prepDevId),
-                        date_from: new Date(dateFrom).toISOString(),
-                        date_to: new Date(dateTo).toISOString(),
-                      },
-                    })
-                  }}
-                >
-                  {runOneOnOnePrep.isPending ? 'Generating...' : 'Generate Brief'}
-                </Button>
+              <CardContent className="p-0">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="border-b bg-muted/50">
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Name</th>
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Type</th>
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Scope</th>
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Frequency</th>
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Last Run</th>
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Enabled</th>
+                      <th className="px-3 py-2 text-xs font-medium text-muted-foreground">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {schedules.map((s) => (
+                      <ScheduleRow key={s.id} schedule={s} />
+                    ))}
+                  </tbody>
+                </table>
               </CardContent>
             </Card>
-
-            <HistoryList
-              items={prepHistory}
-              emptyMessage="No 1:1 prep briefs yet."
-              onRegenerate={(item) => {
-                if (item.scope_id && item.date_from && item.date_to) {
-                  runOneOnOnePrep.mutate({
-                    data: {
-                      developer_id: Number(item.scope_id),
-                      date_from: item.date_from,
-                      date_to: item.date_to,
-                    },
-                    force: true,
-                  })
-                }
-              }}
-              isRegenerating={runOneOnOnePrep.isPending}
-            />
-          </div>
-        </TabsContent>
-
-        {/* Team Health Tab */}
-        <TabsContent value="health">
-          <div className="space-y-4">
-            <Card>
-              <CardContent className="flex flex-wrap items-end gap-4 pt-4">
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Team</label>
-                  <Select value={healthTeam || '__all__'} onValueChange={(v) => v && setHealthTeam(v === '__all__' ? '' : v)}>
-                    <SelectTrigger className="min-w-[200px]">
-                      <SelectValue placeholder="All teams" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__all__">All teams</SelectItem>
-                      {teams.map((t) => (
-                        <SelectItem key={t} value={t}>{t}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="text-sm text-muted-foreground">
-                  {dateFrom} to {dateTo}
-                </div>
-                <Button
-                  disabled={runTeamHealth.isPending}
-                  onClick={() => {
-                    runTeamHealth.mutate({
-                      data: {
-                        ...(healthTeam ? { team: healthTeam } : {}),
-                        date_from: new Date(dateFrom).toISOString(),
-                        date_to: new Date(dateTo).toISOString(),
-                      },
-                    })
-                  }}
-                >
-                  {runTeamHealth.isPending ? 'Generating...' : 'Generate Assessment'}
-                </Button>
-              </CardContent>
-            </Card>
-
-            <HistoryList
-              items={healthHistory}
-              emptyMessage="No team health assessments yet."
-              onRegenerate={(item) => {
-                if (item.date_from && item.date_to) {
-                  runTeamHealth.mutate({
-                    data: {
-                      ...(item.scope_id && item.scope_id !== 'all' ? { team: item.scope_id } : {}),
-                      date_from: item.date_from,
-                      date_to: item.date_to,
-                    },
-                    force: true,
-                  })
-                }
-              }}
-              isRegenerating={runTeamHealth.isPending}
-            />
-          </div>
+          )}
         </TabsContent>
       </Tabs>
     </div>

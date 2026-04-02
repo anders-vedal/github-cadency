@@ -2355,12 +2355,14 @@ Run a standard AI analysis (communication, conflict, or sentiment).
   "scope_type": "developer",
   "scope_id": "1",
   "date_from": "2026-02-01T00:00:00Z",
-  "date_to": "2026-03-01T00:00:00Z"
+  "date_to": "2026-03-01T00:00:00Z",
+  "repo_ids": [1, 2]
 }
 ```
 
 `analysis_type`: `communication`, `conflict`, `sentiment`
 `scope_type`: `developer`, `team`, `repo`
+`repo_ids`: optional array of repo IDs to filter data (omit for all repos)
 `scope_id`: developer ID (string), team name, or repo ID (string)
 
 **Response:** `201 Created` — `AIAnalysisResponse` with structured JSON in `result` field
@@ -2378,9 +2380,12 @@ Generate a structured 1:1 meeting prep brief for a developer.
 {
   "developer_id": 1,
   "date_from": "2026-02-01T00:00:00Z",
-  "date_to": "2026-03-01T00:00:00Z"
+  "date_to": "2026-03-01T00:00:00Z",
+  "repo_ids": [1, 2]
 }
 ```
+
+`repo_ids`: optional array — filters PR list and review quality queries to selected repos. Stats/trends/benchmarks remain unfiltered.
 
 **Context gathered:** developer stats, 4-period trends, team benchmarks, PR list, review quality tiers, active goals with progress, previous 1:1 brief (for continuity), issue creator stats with team averages (if developer has created issues in the period).
 
@@ -2418,11 +2423,13 @@ Generate a comprehensive team health assessment.
 {
   "team": "Platform",
   "date_from": "2026-02-01T00:00:00Z",
-  "date_to": "2026-03-01T00:00:00Z"
+  "date_to": "2026-03-01T00:00:00Z",
+  "repo_ids": [1, 2]
 }
 ```
 
 `team` is optional — omit for all active developers.
+`repo_ids`: optional array — filters CR reviews and heated threads to selected repos. Stats/workload/collaboration remain unfiltered.
 
 **Context gathered:** team stats + benchmarks, workload balance + alerts, collaboration matrix + insights, CHANGES_REQUESTED reviews with body text + metadata (up to 60), heated issue threads with full chronological dialogue (3+ comments between 2 tracked devs), active team goals with current values.
 
@@ -2597,32 +2604,130 @@ Usage breakdown by AI feature with daily timeseries.
 
 ### POST /api/ai/estimate
 
-Estimate token usage and cost for an AI call without executing it. Does not call Claude.
+Estimate token usage and cost for an AI call without executing it. Does not call Claude. For `one_on_one_prep` and `team_health`, builds the real context (same DB queries as the actual analysis) and measures serialized size for accurate token estimation.
 
 | Query Param | Type | Required | Description |
 |-------------|------|----------|-------------|
 | `feature` | string | Yes | `general_analysis`, `one_on_one_prep`, `team_health`, `work_categorization` |
 | `scope_type` | string | No | `developer`, `team`, `repo` (for general_analysis) |
-| `scope_id` | string | No | Entity ID (for general_analysis) |
+| `scope_id` | string | No | Entity ID or developer_id or team name |
 | `date_from` | datetime | No | Period start (defaults to 30 days ago) |
 | `date_to` | datetime | No | Period end (defaults to now) |
+| `repo_ids` | string | No | Comma-separated repo IDs for optional filtering (e.g. `1,2,3`) |
 
 **Response:** `200 OK`
 ```json
 {
-  "estimated_input_tokens": 5000,
+  "estimated_input_tokens": 12450,
   "estimated_output_tokens": 3000,
-  "estimated_cost_usd": 0.06,
+  "estimated_cost_usd": 0.0824,
   "data_items": 45,
-  "note": "Based on 45 data items in scope"
+  "character_count": 34200,
+  "system_prompt_tokens": 150,
+  "remaining_budget_tokens": 500000,
+  "would_exceed_budget": false,
+  "note": "Based on actual context (34,200 characters)"
 }
 ```
 
-Estimation methods vary by feature:
-- `general_analysis`: Gathers actual data items and estimates tokens from volume
-- `one_on_one_prep`: Fixed estimate (~5K input, ~3K output) based on typical context size
-- `team_health`: Scales by active developer count (~200 tokens per dev + 3K base)
+Estimation methods by feature:
+- `general_analysis`: Gathers actual data items, measures serialized JSON size, derives tokens via `chars // 4 + system_prompt_tokens`
+- `one_on_one_prep`: Builds the full 1:1 context (stats, trends, benchmarks, PRs, goals), measures serialized size. Requires `scope_id` (developer ID) for accurate estimate; falls back to 5K heuristic without it.
+- `team_health`: Builds the full team health context (stats, workload, collaboration, CR reviews, heated threads, goals), measures serialized size
 - `work_categorization`: Max batch estimate (200 items)
+
+Budget headroom: `remaining_budget_tokens` is `budget_limit - tokens_used_this_month` (0 if no budget set). `would_exceed_budget` is true if estimated tokens exceed remaining budget.
+
+### AI Analysis Schedules
+
+CRUD for recurring AI analysis schedules. Each schedule is an independent configuration with its own analysis type, scope, repo filter, time range, and cron frequency. APScheduler jobs are registered/updated on create/update/delete.
+
+### GET /api/ai/schedules
+
+List all AI analysis schedules.
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "id": 1,
+    "name": "Weekly 1:1 Prep — Alice",
+    "analysis_type": "one_on_one_prep",
+    "general_type": null,
+    "scope_type": "developer",
+    "scope_id": "5",
+    "repo_ids": null,
+    "time_range_days": 30,
+    "frequency": "weekly",
+    "day_of_week": 0,
+    "hour": 8,
+    "minute": 0,
+    "is_enabled": true,
+    "last_run_at": "2026-03-31T08:00:00Z",
+    "last_run_analysis_id": 42,
+    "last_run_status": "success",
+    "created_by": "admin",
+    "created_at": "2026-03-15T10:00:00Z",
+    "updated_at": "2026-03-15T10:00:00Z",
+    "next_run_description": "Weekly on Monday at 8:00 AM"
+  }
+]
+```
+
+### POST /api/ai/schedules
+
+Create a new schedule and register it with APScheduler.
+
+**Request Body:**
+```json
+{
+  "name": "Weekly 1:1 Prep — Alice",
+  "analysis_type": "one_on_one_prep",
+  "scope_type": "developer",
+  "scope_id": "5",
+  "repo_ids": [1, 2],
+  "time_range_days": 30,
+  "frequency": "weekly",
+  "day_of_week": 0,
+  "hour": 8,
+  "minute": 0
+}
+```
+
+`analysis_type`: `communication`, `conflict`, `sentiment`, `one_on_one_prep`, `team_health`
+`frequency`: `daily`, `weekly`, `biweekly`, `monthly`
+`day_of_week`: 0=Monday..6=Sunday (required for `weekly` and `biweekly`)
+`repo_ids`: optional array of repo IDs to filter analysis data
+
+**Response:** `201 Created` — `AIScheduleResponse`
+
+### PATCH /api/ai/schedules/{schedule_id}
+
+Update a schedule. Only non-null fields are applied. Re-registers the APScheduler job.
+
+**Request Body:** (all fields optional)
+```json
+{
+  "name": "Renamed",
+  "is_enabled": false,
+  "frequency": "daily",
+  "hour": 9
+}
+```
+
+**Response:** `200 OK` — `AIScheduleResponse`
+
+### DELETE /api/ai/schedules/{schedule_id}
+
+Delete a schedule and remove its APScheduler job.
+
+**Response:** `204 No Content`
+
+### POST /api/ai/schedules/{schedule_id}/run
+
+Manually trigger a scheduled analysis. Computes date range from `time_range_days`, runs the analysis, and updates the schedule's last_run fields.
+
+**Response:** `201 Created` — `AIAnalysisResponse`
 
 ---
 

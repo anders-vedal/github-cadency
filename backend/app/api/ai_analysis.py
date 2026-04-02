@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,9 @@ from app.schemas.schemas import (
     AICostEstimate,
     AIAnalysisResponse,
     AIAnalyzeRequest,
+    AIScheduleCreate,
+    AIScheduleResponse,
+    AIScheduleUpdate,
     AISettingsResponse,
     AISettingsUpdate,
     AIUsageSummary,
@@ -17,6 +20,15 @@ from app.schemas.schemas import (
     TeamHealthRequest,
 )
 from app.services.ai_analysis import run_analysis, run_one_on_one_prep, run_team_health
+from app.services.ai_schedules import (
+    compute_next_run_description,
+    create_schedule,
+    delete_schedule,
+    get_schedule,
+    list_schedules,
+    run_scheduled_analysis,
+    update_schedule,
+)
 from app.services.exceptions import AIBudgetExceededError, AIFeatureDisabledError
 from app.services.ai_settings import (
     build_settings_response,
@@ -66,11 +78,14 @@ async def estimate_cost(
     scope_id: str | None = Query(None),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
+    repo_ids: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """Estimate token usage and cost without calling Claude."""
+    parsed_repo_ids = [int(x) for x in repo_ids.split(",") if x.strip()] if repo_ids else None
     return await estimate_analysis_cost(
         db, feature, scope_type, scope_id, date_from, date_to,
+        repo_ids=parsed_repo_ids,
     )
 
 
@@ -93,6 +108,7 @@ async def trigger_analysis(
             date_from=request.date_from,
             date_to=request.date_to,
             force=force,
+            repo_ids=request.repo_ids,
         )
     except AIFeatureDisabledError as e:
         raise HTTPException(status_code=403, detail=e.detail)
@@ -159,6 +175,7 @@ async def one_on_one_prep(
             date_from=request.date_from,
             date_to=request.date_to,
             force=force,
+            repo_ids=request.repo_ids,
         )
     except AIFeatureDisabledError as e:
         raise HTTPException(status_code=403, detail=e.detail)
@@ -186,7 +203,109 @@ async def team_health(
             date_from=request.date_from,
             date_to=request.date_to,
             force=force,
+            repo_ids=request.repo_ids,
         )
+    except AIFeatureDisabledError as e:
+        raise HTTPException(status_code=403, detail=e.detail)
+    except AIBudgetExceededError as e:
+        raise HTTPException(status_code=429, detail=e.detail)
+    resp = AIAnalysisResponse.model_validate(result)
+    resp.reused = result.reused_from_id is not None
+    return resp
+
+
+# --- AI Analysis Schedules ---
+
+
+def _schedule_response(schedule) -> AIScheduleResponse:
+    """Build AIScheduleResponse with computed next_run_description."""
+    resp = AIScheduleResponse.model_validate(schedule)
+    resp.next_run_description = compute_next_run_description(schedule)
+    return resp
+
+
+@router.get("/ai/schedules", response_model=list[AIScheduleResponse])
+async def list_ai_schedules(db: AsyncSession = Depends(get_db)):
+    """List all AI analysis schedules."""
+    schedules = await list_schedules(db)
+    return [_schedule_response(s) for s in schedules]
+
+
+@router.post(
+    "/ai/schedules",
+    response_model=AIScheduleResponse,
+    status_code=201,
+)
+async def create_ai_schedule(
+    data: AIScheduleCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: AuthUser = Depends(get_current_user),
+):
+    """Create a new AI analysis schedule and register it with the scheduler."""
+    schedule = await create_schedule(db, data, created_by=user.github_username)
+
+    # Register with APScheduler
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        from app.main import register_schedule_job
+        register_schedule_job(scheduler, schedule)
+
+    return _schedule_response(schedule)
+
+
+@router.patch("/ai/schedules/{schedule_id}", response_model=AIScheduleResponse)
+async def update_ai_schedule(
+    schedule_id: int,
+    data: AIScheduleUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an AI analysis schedule and re-register with the scheduler."""
+    schedule = await update_schedule(db, schedule_id, data)
+
+    # Re-register with APScheduler
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        from app.main import register_schedule_job
+        register_schedule_job(scheduler, schedule)
+
+    return _schedule_response(schedule)
+
+
+@router.delete("/ai/schedules/{schedule_id}", status_code=204)
+async def delete_ai_schedule(
+    schedule_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an AI analysis schedule and remove it from the scheduler."""
+    await delete_schedule(db, schedule_id)
+
+    # Remove from APScheduler
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        try:
+            scheduler.remove_job(f"ai_schedule_{schedule_id}")
+        except Exception:
+            pass
+
+    return Response(status_code=204)
+
+
+@router.post(
+    "/ai/schedules/{schedule_id}/run",
+    response_model=AIAnalysisResponse,
+    status_code=201,
+)
+async def run_ai_schedule(
+    schedule_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger an AI analysis schedule."""
+    schedule = await get_schedule(db, schedule_id)
+    try:
+        result = await run_scheduled_analysis(db, schedule)
     except AIFeatureDisabledError as e:
         raise HTTPException(status_code=403, detail=e.detail)
     except AIBudgetExceededError as e:

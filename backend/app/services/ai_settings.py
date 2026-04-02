@@ -513,8 +513,15 @@ async def estimate_analysis_cost(
     scope_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    repo_ids: list[int] | None = None,
 ) -> AICostEstimate:
-    """Estimate token usage and cost for an AI analysis without calling Claude."""
+    """Estimate token usage and cost for an AI analysis without calling Claude.
+
+    For general_analysis, one_on_one_prep, and team_health, builds the real
+    context that would be sent to Claude and measures its size for accurate
+    token estimation.
+    """
+    import json as _json
     from datetime import timedelta
 
     ai_settings = await get_ai_settings(db)
@@ -526,40 +533,72 @@ async def estimate_analysis_cost(
     est_input = 0
     est_output = 0
     data_items = 0
+    character_count = 0
+    system_prompt_tokens = 0
     note = ""
 
     if feature == "general_analysis":
-        from app.services.ai_analysis import _gather_scope_texts
+        from app.services.ai_analysis import SYSTEM_PROMPTS, _gather_scope_texts
 
         if scope_type and scope_id:
-            items, _ = await _gather_scope_texts(db, scope_type, scope_id, df, dt)
+            items, _ = await _gather_scope_texts(
+                db, scope_type, scope_id, df, dt, repo_ids=repo_ids,
+            )
             data_items = len(items)
-            est_input = data_items * 125 + 150
+            serialized = _json.dumps(items)
+            character_count = len(serialized.encode("utf-8"))
+            # Determine which system prompt applies
+            # For general_analysis, the analysis_type is the scope-dependent default
+            # but we can't know which sub-type without the caller specifying it.
+            # Use the longest prompt for a conservative estimate.
+            longest_prompt = max(SYSTEM_PROMPTS.values(), key=len)
+            system_prompt_tokens = len(longest_prompt) // 4
+            est_input = character_count // 4 + system_prompt_tokens
             est_output = 2000
-            note = f"Based on {data_items} data items in scope"
+            note = f"Based on {data_items} data items ({character_count:,} characters)"
         else:
             note = "Provide scope_type and scope_id for accurate estimate"
 
     elif feature == "one_on_one_prep":
-        est_input = 5000
-        est_output = 3000
-        data_items = 1
-        note = "Fixed estimate based on typical 1:1 context size"
+        from app.services.ai_analysis import (
+            ONE_ON_ONE_SYSTEM_PROMPT,
+            build_one_on_one_context,
+        )
+
+        if scope_id:
+            context, _ = await build_one_on_one_context(
+                db, int(scope_id), df, dt, repo_ids=repo_ids,
+            )
+            serialized = _json.dumps(context, default=str)
+            character_count = len(serialized.encode("utf-8"))
+            data_items = len(context.get("prs", [])) + len(context.get("goals", []))
+            system_prompt_tokens = len(ONE_ON_ONE_SYSTEM_PROMPT) // 4
+            est_input = character_count // 4 + system_prompt_tokens
+            est_output = 3000
+            note = f"Based on actual context ({character_count:,} characters)"
+        else:
+            est_input = 5000
+            est_output = 3000
+            data_items = 1
+            note = "Provide scope_id (developer_id) for accurate estimate"
 
     elif feature == "team_health":
-        from sqlalchemy import func as sqlfunc
+        from app.services.ai_analysis import (
+            TEAM_HEALTH_SYSTEM_PROMPT,
+            build_team_health_context,
+        )
 
-        from app.models.models import Developer
-
-        dev_count = await db.scalar(
-            select(sqlfunc.count()).select_from(Developer).where(
-                Developer.is_active.is_(True)
-            )
-        ) or 0
-        est_input = dev_count * 200 + 3000
+        team_name = scope_id if scope_id and scope_id != "all" else None
+        context, _ = await build_team_health_context(
+            db, team_name, df, dt, repo_ids=repo_ids,
+        )
+        serialized = _json.dumps(context, default=str)
+        character_count = len(serialized.encode("utf-8"))
+        data_items = context.get("team_stats", {}).get("developer_count", 0)
+        system_prompt_tokens = len(TEAM_HEALTH_SYSTEM_PROMPT) // 4
+        est_input = character_count // 4 + system_prompt_tokens
         est_output = 3000
-        data_items = dev_count
-        note = f"Based on {dev_count} active developers"
+        note = f"Based on actual context ({character_count:,} characters, {data_items} developers)"
 
     elif feature == "work_categorization":
         est_input = 200 * 10 + 60
@@ -573,11 +612,26 @@ async def estimate_analysis_cost(
         ai_settings.output_token_price_per_million,
     )
 
+    # Budget headroom
+    budget_info = await check_budget(db, ai_settings)
+    tokens_used = budget_info["tokens_used"]
+    budget_limit = budget_info["budget_limit"]
+    if budget_limit and budget_limit > 0:
+        remaining = max(0, budget_limit - tokens_used)
+        would_exceed = (est_input + est_output) > remaining
+    else:
+        remaining = 0
+        would_exceed = False
+
     return AICostEstimate(
         estimated_input_tokens=est_input,
         estimated_output_tokens=est_output,
         estimated_cost_usd=round(cost, 4),
         data_items=data_items,
+        character_count=character_count,
+        system_prompt_tokens=system_prompt_tokens,
+        remaining_budget_tokens=remaining,
+        would_exceed_budget=would_exceed,
         note=note,
     )
 
