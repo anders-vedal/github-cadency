@@ -1,6 +1,8 @@
 # DevPulse Production Deployment Guide
 
-This guide walks you through deploying DevPulse end-to-end on a single server. Follow the sections in order for a fresh deployment.
+This guide walks you through deploying DevPulse on a server. Follow the sections in order for a fresh deployment.
+
+> **Multi-app server setup:** If you're hosting multiple apps on the same server (recommended), complete [HETZNER-SETUP.md](HETZNER-SETUP.md) first. It covers server provisioning, Caddy multi-site config, directory layout, port allocation, and shared CI/CD. Then return here for DevPulse-specific steps (sections 3-11).
 
 ---
 
@@ -8,10 +10,10 @@ This guide walks you through deploying DevPulse end-to-end on a single server. F
 
 | Requirement | Details |
 |-------------|---------|
-| **Server** | 2 CPU, 4 GB RAM minimum (AWS `t3.medium`, Azure `B2s`, GCP `e2-medium`) |
+| **Server** | 2 CPU, 4 GB RAM minimum for DevPulse alone. See [HETZNER-SETUP.md](HETZNER-SETUP.md) for multi-app sizing |
 | **OS** | Ubuntu 22.04+ or Debian 12+ (any Linux with Docker support) |
 | **Docker** | Docker Engine + Docker Compose v2 |
-| **Reverse proxy** | Caddy (recommended), nginx, or Traefik for HTTPS termination |
+| **Reverse proxy** | Caddy (recommended), nginx, or Traefik for HTTPS termination. Multi-app Caddy setup in [HETZNER-SETUP.md](HETZNER-SETUP.md) |
 | **Network** | Server on company VPN or internal network — DevPulse should **not** be exposed to the public internet |
 | **GitHub** | A GitHub App installed on your organization (instructions in Section 3) |
 | **CI/CD** | SSH key pair for automated deploys from GitHub Actions |
@@ -20,98 +22,46 @@ This guide walks you through deploying DevPulse end-to-end on a single server. F
 
 ## 2. Server Setup (One-Time)
 
-### Install Docker
+> **Using [HETZNER-SETUP.md](HETZNER-SETUP.md)?** If you already ran `server-bootstrap.sh` from that guide, skip to Section 2b — Docker, Caddy, deploy user, and directories are already set up.
+
+### 2a. Automated setup (recommended)
+
+The bootstrap script handles Docker, Caddy, deploy user, and directories in one command:
 
 ```bash
-curl -fsSL https://get.docker.com | sh
-sudo systemctl enable --now docker
+# On the server as root:
+sudo ./scripts/server-bootstrap.sh "ssh-ed25519 AAAA... deploy-ci"
 ```
 
-### Install Caddy
+See [HETZNER-SETUP.md Section 6](HETZNER-SETUP.md#6-server-setup-one-time) for full instructions, or run each step manually by following the comments in `scripts/server-bootstrap.sh`.
 
-Follow the official instructions: https://caddyserver.com/docs/install
+### 2b. DevPulse-specific setup
 
-On Debian/Ubuntu:
+After the server is bootstrapped and the repo is cloned to `/opt/devpulse`:
+
+**Generate the .env file:**
 
 ```bash
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update
-sudo apt install caddy
+su - deploy
+cd /opt/devpulse
+./scripts/generate-env.sh
 ```
 
-### Create deploy user
+This auto-generates all secrets (PostgreSQL password, JWT secret, encryption key, webhook secret) and prompts you for GitHub App values. It writes to `/etc/devpulse/.env` and creates the symlink to `/opt/devpulse/.env`.
+
+Alternatively, manually copy and edit `.env.example` — see Section 4 for all variables.
+
+**Upload the GitHub App private key** (from your local machine):
 
 ```bash
-sudo adduser --disabled-password deploy
-sudo usermod -aG docker deploy
+scp -i ~/.ssh/hetzner ~/Downloads/your-app.private-key.pem root@<server>:/etc/devpulse/github-app.pem
 ```
 
-### Create directories
+The bootstrap script pre-creates this file with `chmod 600`, so `scp` overwrites it with the correct permissions.
 
-```bash
-sudo mkdir -p /opt/devpulse /backups /etc/devpulse
-sudo chown deploy:deploy /opt/devpulse /backups /etc/devpulse
-```
+**Configure Caddy:**
 
-### Clone the repository
-
-```bash
-sudo -u deploy git clone <your-repo-url> /opt/devpulse
-```
-
-### Set up environment file
-
-```bash
-# Create the .env in a secure location outside the repo
-sudo -u deploy cp /opt/devpulse/.env.example /etc/devpulse/.env
-sudo chmod 600 /etc/devpulse/.env
-
-# Symlink into the repo root (deploy.sh expects .env here)
-sudo -u deploy ln -s /etc/devpulse/.env /opt/devpulse/.env
-```
-
-Edit `/etc/devpulse/.env` — see Section 4 for all variables.
-
-### Copy GitHub App private key
-
-```bash
-# Copy the .pem file downloaded from GitHub (see Section 3)
-sudo -u deploy cp github-app.pem /etc/devpulse/github-app.pem
-sudo chmod 600 /etc/devpulse/github-app.pem
-```
-
-The `docker-compose.yml` mounts this file into the backend container at `/etc/devpulse/github-app.pem` (the in-container path is set automatically). Set the host path in `.env`:
-
-```
-GITHUB_APP_PEM_HOST_PATH=/etc/devpulse/github-app.pem
-```
-
-### Configure firewall
-
-Block direct access to backend and frontend ports — all traffic should go through Caddy:
-
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-sudo ufw allow 80/tcp    # Caddy HTTP (redirects to HTTPS)
-sudo ufw allow 443/tcp   # Caddy HTTPS
-sudo ufw deny 8000/tcp   # Block direct backend access
-sudo ufw deny 3001/tcp   # Block direct frontend access
-sudo ufw enable
-```
-
-> Without this, users can bypass Caddy's IP whitelist by hitting `http://server:8000` or `http://server:3001` directly, since `docker-compose.yml` binds these ports to `0.0.0.0`.
-
-### Make deploy scripts executable
-
-```bash
-sudo -u deploy chmod +x /opt/devpulse/scripts/*.sh
-```
-
-### Configure Caddy
+For single-app deployments:
 
 ```bash
 sudo cp /opt/devpulse/infrastructure/Caddyfile /etc/caddy/Caddyfile
@@ -122,8 +72,29 @@ Edit `/etc/caddy/Caddyfile`:
 2. Replace the IP ranges in the `@blocked` matcher with your VPN/office CIDR ranges
 3. Configure TLS (see comments in the Caddyfile for options)
 
+For multi-app deployments, see [HETZNER-SETUP.md Section 7](HETZNER-SETUP.md#7-caddy-configuration-multi-app).
+
 ```bash
 sudo systemctl enable --now caddy
+```
+
+**Configure firewall** (if not using Hetzner Cloud Firewall):
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow ssh
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
+
+> If using Hetzner Cloud Firewall (see [HETZNER-SETUP.md Section 3](HETZNER-SETUP.md#3-create-a-firewall)), `ufw` is optional — the cloud firewall blocks ports before they reach the server.
+
+**Make deploy scripts executable:**
+
+```bash
+chmod +x /opt/devpulse/scripts/*.sh
 ```
 
 ---
@@ -168,7 +139,9 @@ Create a GitHub App at `https://github.com/organizations/<your-org>/settings/app
 
 ## 4. Production `.env` Configuration
 
-Copy `.env.example` and edit every value. Generate secrets with these commands:
+**Recommended:** Use `./scripts/generate-env.sh` (see Section 2b) — it auto-generates all secrets and prompts for GitHub App values interactively.
+
+**Manual alternative:** Copy `.env.example` and edit every value. Generate secrets with these commands:
 
 ```bash
 # JWT secret (32+ hex chars)
@@ -235,6 +208,8 @@ ssh-keygen -t ed25519 -f deploy-key -N ""
 ```
 
 ### Configure the server
+
+> If you ran `server-bootstrap.sh` and provided the deploy key, this is already done — skip to "Add GitHub repository secrets" below.
 
 ```bash
 # On the server, as the deploy user:
@@ -451,7 +426,7 @@ Use these to confirm each stage is working:
 
 | After section | Verify |
 |---------------|--------|
-| Section 2 (Server Setup) | `docker --version` and `caddy version` succeed; `sudo ufw status` shows rules active |
+| Section 2 (Server Setup) | `docker --version` and `caddy version` succeed; `cat /etc/devpulse/.env` shows generated secrets |
 | Section 5 (CI/CD) | Push to `main` triggers the Deploy workflow in GitHub Actions |
 | Section 6 (First Deploy) | `curl https://<your-domain>/api/health` returns `{"status":"ok"}` |
 | Section 7 (App Setup) | Log in and see the dashboard with synced data |
