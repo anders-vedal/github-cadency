@@ -298,6 +298,7 @@ class BufferedError:
     signature: ErrorSignature
     error_message: str
     http_status: int | None
+    request_context: dict | None = None
     frequency: int = 1
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -351,6 +352,7 @@ class ErrorReporter:
         component: str,
         endpoint_path: str | None = None,
         http_status: int | None = None,
+        request_context: dict | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -367,11 +369,14 @@ class ErrorReporter:
             entry = self._buffer[key]
             entry.frequency += 1
             entry.last_seen = time.time()
+            if request_context:
+                entry.request_context = request_context
         else:
             self._buffer[key] = BufferedError(
                 signature=sig,
                 error_message=sanitized_msg,
                 http_status=http_status,
+                request_context=request_context,
             )
 
     async def flush(self) -> None:
@@ -390,7 +395,7 @@ class ErrorReporter:
                 keys_to_remove.append(key)
                 continue
             if entry.frequency >= self.threshold_frequency:
-                reports.append({
+                report: dict[str, Any] = {
                     "component": entry.signature.component,
                     "error_category": "app_bug",
                     "error_code": entry.signature.error_code,
@@ -400,7 +405,10 @@ class ErrorReporter:
                     "frequency": entry.frequency,
                     "first_seen": _ts(entry.first_seen),
                     "last_seen": _ts(entry.last_seen),
-                })
+                }
+                if entry.request_context:
+                    report["request_context"] = entry.request_context
+                reports.append(report)
                 keys_to_remove.append(key)
 
         for key in keys_to_remove:
@@ -498,6 +506,70 @@ def _derive_component(request: Request) -> str:
     return f"apis.{parts[0] if parts else 'unknown'}"
 
 
+def _extract_request_context(request: Request, exc: Exception) -> dict:
+    """Extract request context for Sentinel reporting."""
+    import traceback
+
+    ua = request.headers.get("user-agent", "")
+    ctx: dict[str, Any] = {
+        "client_ip": request.client.host if request.client else None,
+        "user_agent": ua,
+        "request_url": str(request.url),
+        "request_method": request.method,
+        "referer": request.headers.get("referer"),
+        "device_type": _parse_device_type(ua),
+        "os": _parse_os(ua),
+        "browser": _parse_browser(ua),
+    }
+
+    # Extract source location from traceback
+    if exc.__traceback__:
+        frames = traceback.extract_tb(exc.__traceback__)
+        if frames:
+            last = frames[-1]
+            ctx["source_file"] = _to_relative_path(last.filename)
+            ctx["source_line"] = last.lineno
+            ctx["source_function"] = last.name
+
+    return {k: v for k, v in ctx.items() if v is not None}
+
+
+def _parse_device_type(ua: str) -> str:
+    ua_lower = ua.lower()
+    if any(k in ua_lower for k in ("mobile", "android", "iphone")):
+        return "mobile"
+    if any(k in ua_lower for k in ("tablet", "ipad")):
+        return "tablet"
+    if any(k in ua_lower for k in ("bot", "crawler", "spider")):
+        return "bot"
+    return "desktop"
+
+
+def _parse_browser(ua: str) -> str | None:
+    for name in ("Firefox", "Edg", "Chrome", "Safari", "Opera"):
+        if name in ua:
+            return "Edge" if name == "Edg" else name
+    return None
+
+
+def _parse_os(ua: str) -> str | None:
+    for pattern, name in [("Windows", "Windows"), ("Mac OS", "macOS"), ("Linux", "Linux"),
+                          ("Android", "Android"), ("iPhone", "iOS"), ("iPad", "iPadOS")]:
+        if pattern in ua:
+            return name
+    return None
+
+
+def _to_relative_path(filepath: str) -> str:
+    """Strip absolute path prefix, keep project-relative path."""
+    for marker in ("/app/", "/backend/"):
+        idx = filepath.find(marker)
+        if idx != -1:
+            return filepath[idx + 1:]
+    parts = filepath.replace("\\", "/").split("/")
+    return "/".join(parts[-3:]) if len(parts) > 3 else filepath
+
+
 def register_error_handlers(
     app: FastAPI,
     classifier: ErrorClassifier,
@@ -546,11 +618,13 @@ def register_error_handlers(
         if classified.category == ErrorCategory.APP_BUG:
             logger.error("Unhandled exception", **log_kwargs, exc_info=exc)
             if reporter:
+                request_context = _extract_request_context(request, exc)
                 reporter.record(
                     exc,
                     component=_derive_component(request),
                     endpoint_path=request.url.path,
                     http_status=status,
+                    request_context=request_context,
                 )
         elif classified.category in (ErrorCategory.PROVIDER, ErrorCategory.TRANSIENT):
             logger.warning("External error", **log_kwargs)
