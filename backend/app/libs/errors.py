@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import re
 import time
 from dataclasses import dataclass, field
@@ -302,10 +303,11 @@ class BufferedError:
     frequency: int = 1
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
+    trigger_type: str = "request"
 
 
 class ErrorReporter:
-    """Ring buffer that reports app_bug errors to Sentinel when threshold is crossed."""
+    """Buffers app_bug errors and reports all to Sentinel on each flush."""
 
     def __init__(
         self,
@@ -341,8 +343,10 @@ class ErrorReporter:
         )
 
     def _derive_key(self) -> str:
-        return hashlib.sha256(
-            self.sentinel_secret.encode()
+        return hmac.new(
+            self.sentinel_secret.encode(),
+            self.app_id.encode(),
+            hashlib.sha256,
         ).hexdigest()
 
     def record(
@@ -353,6 +357,7 @@ class ErrorReporter:
         endpoint_path: str | None = None,
         http_status: int | None = None,
         request_context: dict | None = None,
+        trigger_type: str = "request",
     ) -> None:
         if not self.enabled:
             return
@@ -377,47 +382,35 @@ class ErrorReporter:
                 error_message=sanitized_msg,
                 http_status=http_status,
                 request_context=request_context,
+                trigger_type=trigger_type,
             )
 
     async def flush(self) -> None:
         if not self.enabled or not self._buffer:
             return
 
-        now = time.time()
-        cutoff = now - self.threshold_window_seconds
-
-        # Prune old entries and collect reportable ones
         reports: list[dict] = []
-        keys_to_remove: list[str] = []
-
         for key, entry in self._buffer.items():
-            if entry.first_seen < cutoff:
-                keys_to_remove.append(key)
-                continue
-            if entry.frequency >= self.threshold_frequency:
-                report: dict[str, Any] = {
-                    "component": entry.signature.component,
-                    "error_category": "app_bug",
-                    "error_code": entry.signature.error_code,
-                    "error_message": entry.error_message,
-                    "http_status": entry.http_status,
-                    "endpoint_path": entry.signature.endpoint_path,
-                    "frequency": entry.frequency,
-                    "first_seen": _ts(entry.first_seen),
-                    "last_seen": _ts(entry.last_seen),
-                }
-                if entry.request_context:
-                    report["request_context"] = entry.request_context
-                reports.append(report)
-                keys_to_remove.append(key)
+            report: dict[str, Any] = {
+                "component": entry.signature.component,
+                "error_category": "app_bug",
+                "error_code": entry.signature.error_code,
+                "error_message": entry.error_message,
+                "http_status": entry.http_status,
+                "endpoint_path": entry.signature.endpoint_path,
+                "frequency": entry.frequency,
+                "first_seen": _ts(entry.first_seen),
+                "last_seen": _ts(entry.last_seen),
+                "trigger_type": entry.trigger_type,
+            }
+            if entry.request_context:
+                report["request_context"] = entry.request_context
+            reports.append(report)
 
-        for key in keys_to_remove:
-            self._buffer.pop(key, None)
+        self._buffer.clear()
 
-        if not reports:
-            return
-
-        await self._send(reports)
+        if reports:
+            await self._send(reports)
 
     async def _send(self, reports: list[dict]) -> None:
         try:

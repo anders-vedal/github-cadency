@@ -209,6 +209,7 @@ async def trigger_sync(
                     e,
                     component="services.linear_sync",
                     endpoint_path="/api/integrations/sync",
+                    trigger_type="event",
                 )
 
     asyncio.create_task(_bg_sync())

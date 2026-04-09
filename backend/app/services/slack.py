@@ -530,4 +530,4 @@ def _log_scheduled_error(message: str, exc: Exception, component: str) -> None:
         event_type="system.slack",
     )
     if classified.category.value == "app_bug" and _reporter:
-        _reporter.record(exc, component=component)
+        _reporter.record(exc, component=component, trigger_type="scheduled")

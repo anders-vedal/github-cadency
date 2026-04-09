@@ -287,8 +287,8 @@ class TestErrorReporter:
         assert len(reporter._buffer) == 0
 
     @pytest.mark.asyncio
-    async def test_flush_sends_when_threshold_met(self):
-        reporter = self._make_reporter(threshold_frequency=2)
+    async def test_flush_sends_all_buffered_errors(self):
+        reporter = self._make_reporter()
         exc = RuntimeError("test")
         reporter.record(exc, component="apis.test", endpoint_path="/api/test")
         reporter.record(exc, component="apis.test", endpoint_path="/api/test")
@@ -302,31 +302,30 @@ class TestErrorReporter:
             assert reports[0]["component"] == "apis.test"
 
     @pytest.mark.asyncio
-    async def test_flush_skips_below_threshold(self):
-        reporter = self._make_reporter(threshold_frequency=5)
+    async def test_flush_sends_single_occurrence(self):
+        reporter = self._make_reporter()
         reporter.record(RuntimeError("test"), component="apis.test")
 
         with patch.object(reporter, "_send", new_callable=AsyncMock) as mock_send:
             await reporter.flush()
-            mock_send.assert_not_called()
+            mock_send.assert_called_once()
+            reports = mock_send.call_args[0][0]
+            assert len(reports) == 1
+            assert reports[0]["frequency"] == 1
 
     @pytest.mark.asyncio
-    async def test_flush_prunes_old_entries(self):
-        reporter = self._make_reporter(threshold_frequency=1, threshold_window_seconds=10)
-        reporter.record(RuntimeError("test"), component="apis.test")
-
-        # Backdate the entry
-        entry = next(iter(reporter._buffer.values()))
-        entry.first_seen = time.time() - 20
+    async def test_flush_includes_trigger_type(self):
+        reporter = self._make_reporter()
+        reporter.record(RuntimeError("test"), component="apis.test", trigger_type="scheduled")
 
         with patch.object(reporter, "_send", new_callable=AsyncMock) as mock_send:
             await reporter.flush()
-            mock_send.assert_not_called()
-        assert len(reporter._buffer) == 0
+            reports = mock_send.call_args[0][0]
+            assert reports[0]["trigger_type"] == "scheduled"
 
     @pytest.mark.asyncio
-    async def test_flush_clears_reported_entries(self):
-        reporter = self._make_reporter(threshold_frequency=1)
+    async def test_flush_clears_buffer(self):
+        reporter = self._make_reporter()
         reporter.record(RuntimeError("test"), component="apis.test")
 
         with patch.object(reporter, "_send", new_callable=AsyncMock):

@@ -141,7 +141,21 @@ async def scheduled_sync(sync_type: str) -> None:
             return
 
     scope = f"All tracked repos · {'nightly full resync' if sync_type == 'full' else 'incremental'}"
-    await run_sync(sync_type, triggered_by="scheduled", sync_scope=scope)
+    try:
+        await run_sync(sync_type, triggered_by="scheduled", sync_scope=scope)
+    except Exception as e:
+        classified = _classifier.classify(e)
+        log_level = logger.error if classified.category == ErrorCategory.APP_BUG else logger.warning
+        log_level(
+            "Scheduled sync failed",
+            sync_type=sync_type,
+            error=str(e)[:200],
+            exc_type=type(e).__name__,
+            error_category=classified.category.value,
+            event_type="system.sync",
+        )
+        if classified.category == ErrorCategory.APP_BUG:
+            _reporter.record(exc=e, component="services.sync", trigger_type="scheduled")
 
 
 def register_schedule_job(scheduler: AsyncIOScheduler, schedule: AIAnalysisSchedule) -> None:
@@ -238,7 +252,7 @@ async def scheduled_ai_analysis(schedule_id: int) -> None:
                 event_type="ai.schedule",
             )
             if classified.category == ErrorCategory.APP_BUG:
-                _reporter.record(exc=e, component="services.ai_schedules")
+                _reporter.record(exc=e, component="services.ai_schedules", trigger_type="scheduled")
 
 
 async def _recover_orphaned_syncs() -> None:
@@ -386,7 +400,7 @@ async def lifespan(app: FastAPI):
                     event_type="system.notifications",
                 )
                 if classified.category == ErrorCategory.APP_BUG:
-                    _reporter.record(exc=e, component="services.notifications")
+                    _reporter.record(exc=e, component="services.notifications", trigger_type="scheduled")
 
     eval_interval = 15
     try:
@@ -452,7 +466,7 @@ async def lifespan(app: FastAPI):
                     event_type="system.sync",
                 )
                 if classified.category == ErrorCategory.APP_BUG:
-                    _reporter.record(exc=e, component="services.linear_sync")
+                    _reporter.record(exc=e, component="services.linear_sync", trigger_type="scheduled")
 
     scheduler.add_job(
         scheduled_linear_sync,

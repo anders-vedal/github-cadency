@@ -1303,7 +1303,7 @@ async def evaluate_all_alerts(db: AsyncSession) -> dict[str, int]:
                 event_type="system.notifications",
             )
             if classified.category.value == "app_bug" and _reporter:
-                _reporter.record(exc=e, component=f"services.notifications.{name}")
+                _reporter.record(exc=e, component=f"services.notifications.{name}", trigger_type="scheduled")
 
     await db.commit()
 
