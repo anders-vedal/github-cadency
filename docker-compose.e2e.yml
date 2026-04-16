@@ -1,0 +1,51 @@
+# Isolated E2E stack — does not share volumes or ports with the main compose stack.
+# Usage: docker compose -f docker-compose.e2e.yml up -d
+
+services:
+  db-e2e:
+    image: postgres:15.17
+    environment:
+      POSTGRES_USER: devpulse
+      POSTGRES_PASSWORD: devpulse
+      POSTGRES_DB: devpulse_e2e
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - pgdata_e2e:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devpulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend-e2e:
+    build:
+      context: ./backend
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env.e2e
+    environment:
+      DATABASE_URL: postgresql+asyncpg://devpulse:devpulse@db-e2e:5432/devpulse_e2e
+      RATE_LIMIT_ENABLED: "false"
+      LOG_FORMAT: console
+      GITHUB_APP_PRIVATE_KEY_PATH: /etc/devpulse/stub-github-app.pem
+    volumes:
+      - ./e2e/fixtures/stub-github-app.pem:/etc/devpulse/stub-github-app.pem:ro
+    depends_on:
+      db-e2e:
+        condition: service_healthy
+
+  frontend-e2e:
+    build:
+      context: ./frontend
+    ports:
+      - "5174:5173"
+    environment:
+      CI: "true"
+      API_URL: http://backend-e2e:8000
+    depends_on:
+      - backend-e2e
+
+volumes:
+  pgdata_e2e:

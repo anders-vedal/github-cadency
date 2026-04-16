@@ -1,0 +1,160 @@
+name: E2E Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:15.17
+        env:
+          POSTGRES_USER: devpulse
+          POSTGRES_PASSWORD: devpulse
+          POSTGRES_DB: devpulse_e2e
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U devpulse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://devpulse:devpulse@localhost:5434/devpulse_e2e
+      JWT_SECRET: ${{ secrets.E2E_JWT_SECRET }}
+      ENCRYPTION_KEY: ${{ secrets.E2E_ENCRYPTION_KEY }}
+      RATE_LIMIT_ENABLED: "false"
+      LOG_FORMAT: console
+      LOG_LEVEL: WARNING
+      GITHUB_APP_ID: "1"
+      GITHUB_APP_INSTALLATION_ID: "1"
+      GITHUB_APP_PRIVATE_KEY_PATH: ${{ github.workspace }}/e2e/fixtures/stub-github-app.pem
+      GITHUB_ORG: e2e-test-org
+      GITHUB_WEBHOOK_SECRET: e2e-webhook-secret-ci
+      FRONTEND_URL: http://localhost:5173
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Python / Backend ---
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+
+      - name: Run Alembic migrations
+        run: |
+          cd backend
+          alembic upgrade head
+
+      - name: Start backend server
+        run: |
+          cd backend
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          echo "BACKEND_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for backend health check
+        run: |
+          echo "Waiting for backend at http://localhost:8000/api/health ..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+              echo "Backend is ready (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i/30 — backend not ready yet, sleeping 2s"
+            sleep 2
+          done
+          echo "Backend did not become healthy within 60s"
+          exit 1
+
+      # --- Node / Frontend ---
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm via corepack
+        run: corepack enable pnpm
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile
+
+      - name: Start frontend dev server
+        run: |
+          cd frontend
+          pnpm dev &
+          echo "FRONTEND_PID=$!" >> "$GITHUB_ENV"
+        env:
+          VITE_API_URL: http://localhost:8000
+
+      - name: Wait for frontend
+        run: |
+          echo "Waiting for frontend at http://localhost:5173 ..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5173 > /dev/null 2>&1; then
+              echo "Frontend is ready (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i/30 — frontend not ready yet, sleeping 2s"
+            sleep 2
+          done
+          echo "Frontend did not become available within 60s"
+          exit 1
+
+      # --- E2E ---
+
+      - name: Install Playwright dependencies
+        run: |
+          cd e2e
+          npm ci
+
+      - name: Install Playwright browsers
+        run: |
+          cd e2e
+          npx playwright install chromium --with-deps
+
+      - name: Run smoke tests (pull_request)
+        if: github.event_name == 'pull_request'
+        run: |
+          cd e2e
+          npx playwright test --project=chromium-smoke
+
+      - name: Run full E2E suite (push to main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          cd e2e
+          npx playwright test --project=chromium
+
+      # --- Artifacts ---
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: e2e/test-results/
+          retention-days: 7
