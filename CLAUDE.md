@@ -35,7 +35,7 @@ backend/app/
 ├── api/              # FastAPI routers (thin — delegate to services)
 ├── models/
 │   ├── database.py   # Async engine, session factory, Base, get_db()
-│   └── models.py     # All ORM models (42 tables)
+│   └── models.py     # All ORM models (39 tables)
 ├── schemas/schemas.py # All Pydantic request/response models
 ├── services/         # Business logic (all async, accept AsyncSession as first param)
 ├── libs/errors.py    # Nordlabs error convention (ErrorCategory, Classifier, Sanitizer, Reporter)
@@ -67,7 +67,7 @@ frontend/src/
 ```bash
 # Docker (recommended)
 cp .env.example .env && docker compose up
-# Backend: :8000 | Frontend: :3001 | DB: :5432
+# Backend: :8000 | Frontend: :3001 | DB: :5433
 
 # Local dev
 cd backend && pip install -r requirements.txt && alembic upgrade head && uvicorn app.main:app --reload
@@ -82,6 +82,17 @@ cd backend && alembic revision --autogenerate -m "description" && alembic upgrad
 # Observability stack (opt-in)
 docker compose --profile logging up
 ```
+
+## E2E Tests
+
+Playwright-based end-to-end tests live in `e2e/`. Page objects in `e2e/pages/`, test specs in `e2e/tests/` (smoke + insights suites). Config in `e2e/playwright.config.ts` — targets `localhost:5173`, uses `global-setup.ts` for DB seeding and auth state.
+
+```bash
+cd e2e && pnpm install && pnpm exec playwright test          # all tests
+cd e2e && pnpm exec playwright test --project=chromium-smoke  # smoke suite only
+```
+
+Requires backend + frontend running (Playwright auto-starts them locally via `webServer` config, skipped in CI). Uses `docker-compose.e2e.yml` for isolated DB seeding.
 
 ## Key Patterns
 

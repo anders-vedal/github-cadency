@@ -77,6 +77,9 @@ All routers registered under `/api` prefix:
 | `teams` | `/api/teams/*` | teams |
 | `notifications` | `/api/notifications/*` | notifications |
 | `logs` | `/api/logs/*` | logs |
+| `integrations` | `/api/integrations/*` | integrations |
+| `sprints` | `/api/sprints/*`, `/api/projects/*`, `/api/planning/*` | sprints |
+| `system` | `/api/system/*` | system |
 
 Plus standalone `GET /api/health` (no auth) in `main.py`.
 

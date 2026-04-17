@@ -696,7 +696,7 @@ Stats are PR-level only to stay within GitHub API rate limits.
 
 ## Migration Patterns
 
-34 migrations from `000_initial_schema` through `033_add_notification_center`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
+45 migrations from `000_initial_schema` through `040_add_linear_sync_schedule_config`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
 
 `000_initial_schema` is the root migration (`down_revision = None`). It creates the 10 base tables (`developers`, `repositories`, `pull_requests`, `pr_reviews`, `pr_review_comments`, `issues`, `issue_comments`, `sync_events`, `ai_analyses`, `developer_goals`) with their original columns. All subsequent migrations are additive from this base. `alembic upgrade head` is self-contained on a blank database.
 

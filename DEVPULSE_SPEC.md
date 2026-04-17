@@ -43,9 +43,9 @@ DevPulse is an engineering intelligence dashboard that tracks developer activity
 **Tech stack:**
 - Backend: Python 3.11+, FastAPI, SQLAlchemy 2.0 (async), Alembic
 - Database: PostgreSQL 15+
-- Frontend: React 18+, TypeScript, Vite
+- Frontend: React 19, TypeScript, Vite
 - GitHub integration: REST API via httpx, GitHub App for auth
-- AI: Anthropic Claude API (claude-sonnet-4-20250514), called on-demand only
+- AI: Anthropic Claude API (claude-sonnet-4-0), called on-demand only
 - Scheduling: APScheduler (in-process) or system cron
 
 
