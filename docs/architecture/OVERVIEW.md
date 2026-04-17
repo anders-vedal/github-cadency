@@ -55,9 +55,9 @@ Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxy
 
 | Component | Docs |
 |-----------|------|
-| 32 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
-| 15 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
-| 16 services: sync, stats, collaboration, enhanced collaboration, relationships, roles, risk, goals, AI, work categorization, work categories, AI settings, Slack, notifications, exceptions, utils | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
+| 39 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
+| 17 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
+| 21 services: sync, stats, collaboration, enhanced collaboration, relationships, roles, risk, goals, AI, AI schedules, AI settings, work categorization, work categories, encryption, linear sync, sprint stats, Slack, teams, notifications, exceptions, utils | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
 | React pages, hooks, state management, design system | [FRONTEND.md](FRONTEND.md) |
 | End-to-end flows: sync, webhooks, stats, AI, auth, goals, notifications | [DATA-FLOWS.md](DATA-FLOWS.md) |
 
@@ -65,10 +65,10 @@ Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxy
 
 ```
 backend/app/
-├── api/           # 15 routers (thin delegation to services)
-├── models/        # database.py (engine, sessions), models.py (32 ORM models)
+├── api/           # 17 routers (thin delegation to services)
+├── models/        # database.py (engine, sessions), models.py (39 ORM models)
 ├── schemas/       # schemas.py (80+ Pydantic models, enums)
-├── services/      # 14 service modules (all business logic)
+├── services/      # 21 service modules (all business logic)
 ├── logging/       # structlog setup, request correlation middleware, get_logger()
 ├── config.py      # pydantic-settings (env vars)
 └── main.py        # App factory, CORS, router registration, APScheduler lifespan

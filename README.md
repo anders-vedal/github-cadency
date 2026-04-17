@@ -131,7 +131,7 @@ This starts three services:
 |---------|-----|-------------|
 | **Frontend** | http://localhost:5173 | React dashboard (proxies `/api` to backend) |
 | **Backend** | http://localhost:8000 | FastAPI server with auto-reload |
-| **Database** | localhost:5432 | PostgreSQL 15 (user/pass/db: `devpulse`) |
+| **Database** | localhost:5433 | PostgreSQL 15 (user/pass/db: `devpulse`) |
 
 The backend automatically runs Alembic migrations on startup and begins syncing on schedule.
 
@@ -181,7 +181,7 @@ pnpm dev                      # Start the dev server on :5173
 
 3. **Trigger an initial sync:** Click "Full Sync" on the Sync Status page, or call the API directly:
    ```bash
-   curl -X POST http://localhost:8000/api/sync/full \
+   curl -X POST http://localhost:8000/api/sync/start \
      -H "Authorization: Bearer <YOUR_DEVPULSE_ADMIN_TOKEN>"
    ```
 

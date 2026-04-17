@@ -30,6 +30,10 @@ related:
 | `slack` | `services/slack.py` | ~350 | Slack config/user settings CRUD, notification senders (DM + channel), scheduled jobs |
 | `notifications` | `services/notifications.py` | ~1300 | In-app notification center: alert evaluation (16 types, 10 evaluators), materialization, read/dismiss tracking, config CRUD, auto-resolution |
 | `exceptions` | `services/exceptions.py` | ~25 | Custom service-layer exceptions (`AIFeatureDisabledError`, `AIBudgetExceededError`) |
+| `ai_schedules` | `services/ai_schedules.py` | ~260 | AI analysis scheduling CRUD, schedule execution, next-run computation |
+| `encryption` | `services/encryption.py` | ~35 | Shared Fernet encryption for Slack tokens and Linear API keys |
+| `linear_sync` | `services/linear_sync.py` | ~1200 | Linear GraphQL sync orchestration: projects → cycles → issues → PR linking → developer mapping |
+| `sprint_stats` | `services/sprint_stats.py` | ~560 | Sprint/planning stats: velocity, completion, scope creep, triage, alignment, estimation accuracy |
 | `utils` | `services/utils.py` | ~15 | Shared utilities (`default_range` date defaulting) |
 
 ## Cross-Service Dependencies
