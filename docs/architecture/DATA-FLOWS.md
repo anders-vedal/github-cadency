@@ -401,7 +401,7 @@ Categories and rules are managed via the `/api/work-categories` API surface (`se
 10. On shutdown: scheduler.shutdown(wait=True)
 
 Router registration (main.py):
-- All 15 routers get /api prefix
+- All 17 routers get /api prefix
 - CORS: allow_origins=[frontend_url], credentials=True, all methods/headers
 - Standalone GET /api/health (no auth)
 ```

@@ -159,7 +159,7 @@ Create a developer. **Admin only.**
 }
 ```
 
-`role` must be a valid `role_key` from `GET /api/roles`. 13 default roles are seeded (see [Roles](#roles) section). Returns `400` if the role doesn't exist.
+`role` must be a valid `role_key` from `GET /api/roles`. 15 default roles are seeded (see [Roles](#roles) section). Returns `400` if the role doesn't exist.
 
 **Response:** `201 Created` — `DeveloperResponse`
 
@@ -266,7 +266,7 @@ Role definitions are admin-configurable. Each role maps to a fixed **contributio
 | `non_contributor` | Excluded from all benchmarks |
 | `system` | Excluded from everything |
 
-13 default roles are seeded by migration. Admins can create additional custom roles.
+15 default roles are seeded by migration. Admins can create additional custom roles.
 
 ### GET /api/roles
 

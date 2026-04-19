@@ -246,7 +246,7 @@ devpulse/
 │   │   ├── services/     # Business logic (sync, stats, goals, AI)
 │   │   ├── config.py     # Environment variable definitions
 │   │   └── main.py       # App factory, middleware, scheduler
-│   ├── alembic/          # Database migrations
+│   ├── migrations/       # Database migrations (Alembic)
 │   ├── tests/            # pytest test suite
 │   ├── requirements.txt
 │   └── Dockerfile

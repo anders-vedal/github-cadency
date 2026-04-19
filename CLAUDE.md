@@ -126,6 +126,7 @@ Requires backend + frontend running (Playwright auto-starts them locally via `we
 - **Nav:** Top nav (Dashboard, Executive, Insights, Goals, Admin dropdown). Insights + Admin use `SidebarLayout`. `isNavActive()` uses prefix matching. Sprint/Planning/Projects sidebar links conditionally rendered based on `useIntegrations()` — shows "Sprint Planning ›" setup link when Linear not configured.
 - **Date range:** Global `DateRangeContext` in Layout header, consumed by all pages.
 - **Trend deltas:** Current vs previous period. For lower-is-better metrics, green = decrease.
+- **AI rendering:** `components/ai/` — structured views for AI analysis output. `AnalysisResultRenderer` dispatches by analysis type to `GenericAnalysisView` (general), `OneOnOnePrepView` (1:1 prep briefs), or `TeamHealthView` (team health). Each renders Claude API JSON as themed card layouts with sections, recommendations, and metrics.
 
 ## Architecture Advisory
 
