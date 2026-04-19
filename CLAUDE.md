@@ -94,6 +94,26 @@ cd e2e && pnpm exec playwright test --project=chromium-smoke  # smoke suite only
 
 Requires backend + frontend running (Playwright auto-starts them locally via `webServer` config, skipped in CI). Uses `docker-compose.e2e.yml` for isolated DB seeding.
 
+## Backend Tests
+
+Three-tier test suite in `backend/tests/` (75 files, ~14.6k LOC). Shared fixtures in `backend/conftest.py` — uses aiosqlite in-memory DB with JSONB→JSON patching for SQLite compatibility. No PostgreSQL required.
+
+### Tiers
+
+| Tier | Dir | Files | Focus |
+|---|---|---|---|
+| **Unit** | `tests/unit/` | 30 | Pure logic — scoring, detection, parsing, guards. No DB. |
+| **Service** | `tests/service/` | 5 | Service-layer functions with async DB session (AI analysis, sync, schedules). |
+| **Integration** | `tests/integration/` | 39 | Full API round-trips via `httpx.AsyncClient` against the ASGI app. Auth, CRUD, filtering, pagination. |
+
+### Conventions
+
+- All tests are async (`pytest-asyncio`).
+- `conftest.py` seeds default roles (15), teams (2), and work categories via fixtures.
+- Auth helpers: `make_admin_token()`, `make_developer_token()` — create JWTs for test requests.
+- Integration tests use `AsyncClient(transport=ASGITransport(app=app))` — no live server needed.
+- Naming: `test_<feature>.py` mirrors the service or router under test.
+
 ## Key Patterns
 
 ### Backend
