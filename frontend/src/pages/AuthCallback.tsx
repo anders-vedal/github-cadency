@@ -13,9 +13,11 @@ export default function AuthCallback() {
       const token = fragmentParams.get('token')
       if (token) {
         localStorage.setItem('devpulse_token', token)
-        // Clear the fragment from the URL to prevent referrer leaks
-        window.history.replaceState(null, '', window.location.pathname)
-        navigate('/', { replace: true })
+        // Full page reload instead of SPA navigate: useAuthProvider captures
+        // the token from localStorage at hook-invocation time and won't re-read
+        // it on React re-render. A reload gives the app a fresh JS context so
+        // the /auth/me query fires with the new token.
+        window.location.href = '/'
         return
       }
     }
