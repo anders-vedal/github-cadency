@@ -9,6 +9,6 @@ export class InsightsPage {
 
   async expectWorkloadLoaded() {
     await this.page.getByRole('navigation').waitFor()
-    await this.page.getByRole('heading', { name: /workload/i }).waitFor()
+    await this.page.getByRole('heading', { level: 1, name: /workload/i }).waitFor()
   }
 }
