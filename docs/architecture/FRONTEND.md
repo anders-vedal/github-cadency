@@ -163,6 +163,7 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useRepos()` | `GET /sync/repos` | |
 | `useDiscoverRepos()` | `POST /sync/discover-repos` | Sets `['repos']` cache |
 | `useToggleTracking()` | `PATCH /sync/repos/:id/track` | |
+| `useDeleteRepoData()` | `DELETE /sync/repos/:id/data` | Invalidates `['repos']` + `['repos-summary']`. Used by DeleteRepoDataDialog on `/repos` — typed-confirmation (user types `full_name`) before the mutation fires. |
 | `useSyncStatus()` | `GET /sync/status` | Adaptive poll: 3s active, 10s idle |
 | `useSyncEvents()` | `GET /sync/events` | Fixed 10s poll |
 | `useSyncEvent(id)` | `GET /sync/events/:id` | 3s when active, stops when done |

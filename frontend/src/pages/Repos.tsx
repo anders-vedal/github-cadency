@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useRepos, useToggleTracking } from '@/hooks/useSync'
+import { Trash2 } from 'lucide-react'
+import { useDeleteRepoData, useRepos, useToggleTracking } from '@/hooks/useSync'
 import { useRepoStats, useReposSummary } from '@/hooks/useStats'
 import { useDateRange } from '@/hooks/useDateRange'
 import ErrorCard from '@/components/ErrorCard'
@@ -14,6 +15,14 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   Select,
   SelectContent,
@@ -112,11 +121,78 @@ function TrendBadge({ trend }: { trend?: TrendIndicator }) {
   )
 }
 
+// --- Delete confirmation dialog ---
+
+function DeleteRepoDataDialog({
+  repo,
+  open,
+  onOpenChange,
+}: {
+  repo: Repo
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const [confirmText, setConfirmText] = useState('')
+  const deleteData = useDeleteRepoData()
+  const expected = repo.full_name ?? repo.name ?? ''
+  const matches = confirmText === expected
+
+  const handleClose = (next: boolean) => {
+    if (!next) setConfirmText('')
+    onOpenChange(next)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete synced data for {expected}?</DialogTitle>
+          <DialogDescription>
+            This permanently removes all PRs, reviews, review comments, check runs,
+            issues, issue comments, deployments, and tree files cached for this
+            repository. The repo will also be untracked. Settings, roles, and other
+            repos are untouched. The repo can be re-synced later from GitHub.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Type <span className="font-mono font-semibold text-foreground">{expected}</span> to confirm.
+          </p>
+          <Input
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={expected}
+            autoFocus
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => handleClose(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={!matches || deleteData.isPending}
+            onClick={() => {
+              deleteData.mutate(repo.id, {
+                onSuccess: () => handleClose(false),
+              })
+            }}
+          >
+            {deleteData.isPending ? 'Deleting…' : 'Delete synced data'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // --- Expanded stats panel ---
 
-function RepoStatsPanel({ repoId }: { repoId: number }) {
+function RepoStatsPanel({ repo }: { repo: Repo }) {
+  const repoId = repo.id
   const { dateFrom, dateTo } = useDateRange()
   const { data: stats, isLoading } = useRepoStats(repoId, dateFrom, dateTo)
+  const [deleteOpen, setDeleteOpen] = useState(false)
 
   if (isLoading) {
     return (
@@ -182,7 +258,21 @@ function RepoStatsPanel({ repoId }: { repoId: number }) {
         <Link to={`/insights/code-churn?repo_id=${repoId}`}>
           <Button variant="outline" size="sm">Code Churn</Button>
         </Link>
+        <Button
+          variant="destructive"
+          size="sm"
+          className="ml-auto"
+          onClick={() => setDeleteOpen(true)}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Delete synced data
+        </Button>
       </div>
+      <DeleteRepoDataDialog
+        repo={repo}
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+      />
     </div>
   )
 }
@@ -529,7 +619,7 @@ export default function Repos() {
                   rows.push(
                     <TableRow key={`${repo.id}-expand`}>
                       <TableCell colSpan={6} className="bg-muted/30 p-0">
-                        <RepoStatsPanel repoId={repo.id} />
+                        <RepoStatsPanel repo={repo} />
                       </TableCell>
                     </TableRow>,
                   )

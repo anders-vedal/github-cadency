@@ -686,9 +686,13 @@ GitHub data arrives before contributors may be in the `developers` table. `resol
 
 JSONB columns are mutated via `_append_jsonb()` helper which reassigns the column to trigger SQLAlchemy change detection.
 
-### No Cascade Rules
+### Cascade Rules
 
-No FK has `ondelete="CASCADE"` and no relationship has `cascade="all, delete-orphan"`. Deleting a repository would cause FK violations. This is intentional -- the app never deletes GitHub data.
+GitHub-sourced tables (`repositories`, `pull_requests`, `pr_reviews`, `pr_review_comments`, `pr_files`, `pr_check_runs`, `issues`, `issue_comments`, `deployments`, `repo_tree_files`) have **no DB-level cascade**. FK relationships on these tables don't declare `ondelete="CASCADE"`, so a raw `DELETE FROM repositories WHERE id = ?` would fail with FK violations.
+
+Deletion is instead handled at the application layer by `DELETE /api/sync/repos/{id}/data` (`app.api.sync.delete_repo_data`), which stages per-table `delete()` statements in the correct order: PR-children (reviews, review comments, files, check runs, external-issue links) → pull_requests → issue-children (issue comments) → issues → deployments (after nulling the `recovery_deployment_id` self-ref) → repo_tree_files. The `repositories` row itself is preserved — the endpoint just resets `is_tracked=false` and clears `last_synced_at`. Aggregate tables (`developer_collaboration_scores`, `developer_relationships`) are not purged — they recompute on the next sync.
+
+Integration-sourced tables (`external_projects`, `external_sprints`, `external_issues`, `developer_identity_map`, `pr_external_issue_links`) **do** declare `ondelete="CASCADE"` on the integration-config FK, so removing an `integration_config` row cascades to all associated external data in one statement.
 
 ### No Commit-Level Data
 

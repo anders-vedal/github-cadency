@@ -843,6 +843,25 @@ class RepoTrackUpdate(BaseModel):
     is_tracked: bool
 
 
+class RepoDataDeletedCounts(BaseModel):
+    pull_requests: int
+    pr_reviews: int
+    pr_review_comments: int
+    pr_files: int
+    pr_check_runs: int
+    pr_external_issue_links: int
+    issues: int
+    issue_comments: int
+    deployments: int
+    repo_tree_files: int
+
+
+class RepoDataDeleteResponse(BaseModel):
+    repo_id: int
+    full_name: str | None
+    deleted: RepoDataDeletedCounts
+
+
 class SyncTriggerRequest(BaseModel):
     sync_type: Literal["full", "incremental"] = "incremental"
     repo_ids: list[int] | None = None

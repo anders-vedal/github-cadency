@@ -195,6 +195,23 @@ export interface Repo {
   issue_count: number
 }
 
+export interface RepoDataDeleteResponse {
+  repo_id: number
+  full_name: string | null
+  deleted: {
+    pull_requests: number
+    pr_reviews: number
+    pr_review_comments: number
+    pr_files: number
+    pr_check_runs: number
+    pr_external_issue_links: number
+    issues: number
+    issue_comments: number
+    deployments: number
+    repo_tree_files: number
+  }
+}
+
 // --- Sync ---
 
 export interface SyncRepoResult {

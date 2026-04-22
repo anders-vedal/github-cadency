@@ -2,17 +2,33 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import require_admin
 from app.models.database import get_db
 from app.rate_limit import limiter
-from app.models.models import Issue, PullRequest, Repository, SyncEvent, SyncScheduleConfig
+from app.models.models import (
+    Deployment,
+    Issue,
+    IssueComment,
+    PRCheckRun,
+    PRExternalIssueLink,
+    PRFile,
+    PRReview,
+    PRReviewComment,
+    PullRequest,
+    Repository,
+    RepoTreeFile,
+    SyncEvent,
+    SyncScheduleConfig,
+)
 from app.config import validate_github_config
 from app.schemas.schemas import (
     PreflightCheck,
     PreflightResponse,
+    RepoDataDeletedCounts,
+    RepoDataDeleteResponse,
     RepoResponse,
     RepoTrackUpdate,
     SyncEventResponse,
@@ -449,6 +465,87 @@ async def toggle_tracking(
         created_at=repo.created_at,
         pr_count=pr_count,
         issue_count=issue_count,
+    )
+
+
+@router.delete("/sync/repos/{repo_id}/data", response_model=RepoDataDeleteResponse)
+async def delete_repo_data(
+    repo_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Purge all synced data for a repo (PRs, issues, reviews, deployments, tree files).
+
+    Keeps the repository row but marks it untracked and clears last_synced_at, so a
+    future sync won't pull data for this repo unless the admin re-enables tracking.
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    pr_ids = (await db.scalars(
+        select(PullRequest.id).where(PullRequest.repo_id == repo_id)
+    )).all()
+    issue_ids = (await db.scalars(
+        select(Issue.id).where(Issue.repo_id == repo_id)
+    )).all()
+
+    counts = {
+        "pr_reviews": 0,
+        "pr_review_comments": 0,
+        "pr_files": 0,
+        "pr_check_runs": 0,
+        "pr_external_issue_links": 0,
+        "pull_requests": 0,
+        "issue_comments": 0,
+        "issues": 0,
+        "deployments": 0,
+        "repo_tree_files": 0,
+    }
+
+    if pr_ids:
+        for model, key in (
+            (PRReviewComment, "pr_review_comments"),
+            (PRReview, "pr_reviews"),
+            (PRFile, "pr_files"),
+            (PRCheckRun, "pr_check_runs"),
+        ):
+            res = await db.execute(delete(model).where(model.pr_id.in_(pr_ids)))
+            counts[key] = res.rowcount or 0
+        res = await db.execute(
+            delete(PRExternalIssueLink).where(PRExternalIssueLink.pull_request_id.in_(pr_ids))
+        )
+        counts["pr_external_issue_links"] = res.rowcount or 0
+        res = await db.execute(delete(PullRequest).where(PullRequest.repo_id == repo_id))
+        counts["pull_requests"] = res.rowcount or 0
+
+    if issue_ids:
+        res = await db.execute(
+            delete(IssueComment).where(IssueComment.issue_id.in_(issue_ids))
+        )
+        counts["issue_comments"] = res.rowcount or 0
+        res = await db.execute(delete(Issue).where(Issue.repo_id == repo_id))
+        counts["issues"] = res.rowcount or 0
+
+    # Null out recovery_deployment_id self-refs before deleting deployments
+    await db.execute(
+        update(Deployment)
+        .where(Deployment.repo_id == repo_id)
+        .values(recovery_deployment_id=None)
+    )
+    res = await db.execute(delete(Deployment).where(Deployment.repo_id == repo_id))
+    counts["deployments"] = res.rowcount or 0
+
+    res = await db.execute(delete(RepoTreeFile).where(RepoTreeFile.repo_id == repo_id))
+    counts["repo_tree_files"] = res.rowcount or 0
+
+    repo.is_tracked = False
+    repo.last_synced_at = None
+    await db.commit()
+
+    return RepoDataDeleteResponse(
+        repo_id=repo.id,
+        full_name=repo.full_name,
+        deleted=RepoDataDeletedCounts(**counts),
     )
 
 

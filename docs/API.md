@@ -2227,6 +2227,34 @@ Enable or disable tracking for a repository.
 
 **Response:** `200 OK` — `RepoResponse` (includes `pr_count`, `issue_count`)
 
+### DELETE /api/sync/repos/{repo_id}/data
+
+Purge all synced data for a single repo — PRs, reviews, review comments, files, check runs, external-issue links, issues, issue comments, deployments, and tree files. The `repositories` row itself is kept but `is_tracked` is set to `false` and `last_synced_at` is cleared so future syncs skip it unless re-enabled. Other repos are untouched. Aggregates like `developer_collaboration_scores` and `sync_events` history are not cleaned — collaboration scores recompute on next sync; sync events are historical records.
+
+Useful for removing data from repos the GitHub App has access to but the user doesn't want tracked (e.g. filtering work repos out of a personal dashboard).
+
+**Response:** `200 OK` — `RepoDataDeleteResponse`
+```json
+{
+  "repo_id": 42,
+  "full_name": "org/repo",
+  "deleted": {
+    "pull_requests": 150,
+    "pr_reviews": 320,
+    "pr_review_comments": 84,
+    "pr_files": 1240,
+    "pr_check_runs": 890,
+    "pr_external_issue_links": 0,
+    "issues": 45,
+    "issue_comments": 120,
+    "deployments": 200,
+    "repo_tree_files": 0
+  }
+}
+```
+
+**Errors:** `404` — repository not found.
+
 ### GET /api/sync/events/{event_id}
 
 Get a single sync event by ID with full progress, error, and log details.

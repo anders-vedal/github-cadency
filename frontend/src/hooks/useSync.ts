@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ApiError, apiFetch } from '@/utils/api'
-import type { PreflightResponse, Repo, SyncEvent, SyncScheduleConfig, SyncStartRequest, SyncStatusResponse } from '@/utils/types'
+import type { PreflightResponse, Repo, RepoDataDeleteResponse, SyncEvent, SyncScheduleConfig, SyncStartRequest, SyncStatusResponse } from '@/utils/types'
 
 /** Extract a human-readable detail from an apiFetch error. */
 function extractErrorDetail(error: Error): string {
@@ -55,6 +55,25 @@ export function useToggleTracking() {
       toast.success(isTracked ? 'Repository tracking enabled' : 'Repository tracking disabled')
     },
     onError: () => toast.error('Failed to update tracking'),
+  })
+}
+
+export function useDeleteRepoData() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<RepoDataDeleteResponse>(`/sync/repos/${id}/data`, { method: 'DELETE' }),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ['repos'] })
+      qc.invalidateQueries({ queryKey: ['repos-summary'] })
+      const total = Object.values(result.deleted).reduce((a, b) => a + b, 0)
+      toast.success(
+        total > 0
+          ? `Deleted ${total.toLocaleString()} records for ${result.full_name ?? 'repo'}`
+          : `No synced data to delete for ${result.full_name ?? 'repo'}`,
+      )
+    },
+    onError: (error: Error) => toast.error(`Failed to delete data: ${extractErrorDetail(error)}`),
   })
 }
 

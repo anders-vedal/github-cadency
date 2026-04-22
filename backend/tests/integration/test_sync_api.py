@@ -3,8 +3,16 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import func, select
 
-from app.models.models import Repository, SyncEvent, SyncScheduleConfig
+from app.models.models import (
+    Issue,
+    PRReview,
+    PullRequest,
+    Repository,
+    SyncEvent,
+    SyncScheduleConfig,
+)
 
 
 class TestListRepos:
@@ -60,6 +68,100 @@ class TestToggleTracking:
             json={"is_tracked": True},
         )
         assert resp.status_code == 404
+
+
+class TestDeleteRepoData:
+    @pytest.mark.asyncio
+    async def test_purges_target_only(
+        self, client, db_session, sample_repo, sample_pr, sample_review, sample_issue
+    ):
+        """Delete target repo's synced data; untouched repo keeps everything."""
+        # Add a sibling repo with its own PR + issue — must survive the purge
+        sibling = Repository(
+            github_id=99999, name="keep", full_name="org/keep", is_tracked=True,
+        )
+        db_session.add(sibling)
+        await db_session.commit()
+        await db_session.refresh(sibling)
+
+        sibling_pr = PullRequest(
+            github_id=9001, repo_id=sibling.id, number=1,
+            title="keep me", state="open", is_merged=False,
+            created_at=datetime.now(timezone.utc),
+        )
+        sibling_issue = Issue(
+            github_id=9002, repo_id=sibling.id, number=1,
+            title="keep this issue", state="open",
+            created_at=datetime.now(timezone.utc),
+        )
+        db_session.add_all([sibling_pr, sibling_issue])
+        await db_session.commit()
+
+        resp = await client.delete(f"/api/sync/repos/{sample_repo.id}/data")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["repo_id"] == sample_repo.id
+        assert body["deleted"]["pull_requests"] == 1
+        assert body["deleted"]["pr_reviews"] == 1
+        assert body["deleted"]["issues"] == 1
+
+        # Target repo's data gone
+        assert (
+            await db_session.scalar(
+                select(func.count()).select_from(PullRequest).where(
+                    PullRequest.repo_id == sample_repo.id
+                )
+            )
+        ) == 0
+        assert (
+            await db_session.scalar(
+                select(func.count()).select_from(PRReview).where(
+                    PRReview.pr_id == sample_pr.id
+                )
+            )
+        ) == 0
+        assert (
+            await db_session.scalar(
+                select(func.count()).select_from(Issue).where(
+                    Issue.repo_id == sample_repo.id
+                )
+            )
+        ) == 0
+
+        # Repo row kept, tracking reset
+        await db_session.refresh(sample_repo)
+        assert sample_repo.is_tracked is False
+        assert sample_repo.last_synced_at is None
+
+        # Sibling untouched
+        assert (
+            await db_session.scalar(
+                select(func.count()).select_from(PullRequest).where(
+                    PullRequest.repo_id == sibling.id
+                )
+            )
+        ) == 1
+        assert (
+            await db_session.scalar(
+                select(func.count()).select_from(Issue).where(
+                    Issue.repo_id == sibling.id
+                )
+            )
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_not_found(self, client):
+        resp = await client.delete("/api/sync/repos/99999/data")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_empty_repo_succeeds(self, client, sample_repo):
+        """Repo with no synced data — endpoint still returns 200, all counts 0."""
+        resp = await client.delete(f"/api/sync/repos/{sample_repo.id}/data")
+        assert resp.status_code == 200
+        body = resp.json()
+        for v in body["deleted"].values():
+            assert v == 0
 
 
 class TestSyncEvents:
