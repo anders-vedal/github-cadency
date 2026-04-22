@@ -1,6 +1,6 @@
 # DevPulse
 
-Engineering intelligence dashboard that tracks developer activity across GitHub repositories for an organization. Provides PR/review/cycle-time metrics, team benchmarks, trend analysis, workload balance, collaboration insights, developer goals, and optional on-demand AI analysis via Claude API.
+Engineering intelligence dashboard that tracks developer activity across GitHub repositories and Linear workspaces. Provides PR/review/cycle-time metrics, team benchmarks, trend analysis, workload balance, collaboration insights, developer goals, DORA v2 with AI-cohort split, flow analytics, bottleneck intelligence, and optional on-demand AI analysis via Claude API.
 
 ## How It Works
 

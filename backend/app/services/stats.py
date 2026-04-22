@@ -2630,8 +2630,18 @@ async def get_issue_linkage_by_developer(
 ) -> IssueLinkageByDeveloper:
     date_from, date_to = _default_range(date_from, date_to)
 
-    # Get active developers, optionally filtered by team
-    dev_filters = [Developer.is_active.is_(True)]
+    # Get active developers, optionally filtered by team.
+    # Exclude system accounts (e.g. dependabot[bot]) and non-contributors — PR workflow
+    # metrics shouldn't judge bots or roles that don't author PRs.
+    from app.models.models import RoleDefinition
+
+    excluded_roles_q = select(RoleDefinition.role_key).where(
+        RoleDefinition.contribution_category.in_(("system", "non_contributor"))
+    )
+    dev_filters = [
+        Developer.is_active.is_(True),
+        Developer.role.notin_(excluded_roles_q),
+    ]
     if team:
         dev_filters.append(Developer.team == team)
     dev_result = await db.execute(
@@ -3236,21 +3246,28 @@ async def _get_issue_creator_stats_linear(
     # Maps external_issue_id → list of PR created_at
     issue_pr_dates: dict[int, list[datetime]] = {}
     issue_pr_counts: dict[int, int] = {}
+    # Per-issue downstream PR review rounds (for creator ticket-clarity signal)
+    issue_pr_review_rounds: dict[int, list[int]] = {}
     if issue_ids:
         link_result = await db.execute(
             select(
                 PRExternalIssueLink.external_issue_id,
                 PullRequest.created_at,
+                PullRequest.review_round_count,
             )
             .join(PullRequest, PRExternalIssueLink.pull_request_id == PullRequest.id)
             .where(PRExternalIssueLink.external_issue_id.in_(issue_ids))
         )
-        for ext_issue_id, pr_created_at in link_result.all():
+        for ext_issue_id, pr_created_at, review_rounds in link_result.all():
             issue_pr_counts[ext_issue_id] = issue_pr_counts.get(ext_issue_id, 0) + 1
             if pr_created_at:
                 if ext_issue_id not in issue_pr_dates:
                     issue_pr_dates[ext_issue_id] = []
                 issue_pr_dates[ext_issue_id].append(pr_created_at)
+            if review_rounds is not None:
+                issue_pr_review_rounds.setdefault(ext_issue_id, []).append(
+                    int(review_rounds)
+                )
 
     # Compute per-creator stats
     creators: list[IssueCreatorStats] = []
@@ -3282,6 +3299,10 @@ async def _get_issue_creator_stats_linear(
         # PR linkage metrics
         pr_counts: list[int] = []
         time_to_first_pr: list[float] = []
+        # All linked PRs' review-round counts across this creator's issues —
+        # flattened so a creator with 4 PRs at 1 round each averages 1.0 rather
+        # than per-issue-averaging which would bias toward fewer-linked issues.
+        downstream_rounds: list[int] = []
         for row in issues:
             ext_issue_id = row[0]
             issue_created_at = row[5]
@@ -3292,6 +3313,8 @@ async def _get_issue_creator_stats_linear(
                 delta_s = (earliest_pr - issue_created_at).total_seconds()
                 if delta_s >= 0:
                     time_to_first_pr.append(delta_s)
+            if ext_issue_id in issue_pr_review_rounds:
+                downstream_rounds.extend(issue_pr_review_rounds[ext_issue_id])
 
         avg_prs_per_issue = (
             round(statistics.mean(pr_counts), 2) if pr_counts else None
@@ -3299,6 +3322,9 @@ async def _get_issue_creator_stats_linear(
         avg_time_to_first_pr_hours = (
             round(statistics.mean(time_to_first_pr) / 3600, 1)
             if time_to_first_pr else None
+        )
+        avg_downstream_pr_review_rounds = (
+            round(statistics.mean(downstream_rounds), 2) if downstream_rounds else None
         )
 
         creators.append(IssueCreatorStats(
@@ -3315,6 +3341,8 @@ async def _get_issue_creator_stats_linear(
             avg_prs_per_issue=avg_prs_per_issue,
             issues_with_body_under_100_chars=body_under_100,
             avg_time_to_first_pr_hours=avg_time_to_first_pr_hours,
+            avg_downstream_pr_review_rounds=avg_downstream_pr_review_rounds,
+            sample_size_downstream_prs=len(downstream_rounds),
         ))
 
     creators.sort(key=lambda c: c.issues_created, reverse=True)
@@ -3443,6 +3471,20 @@ def _compute_team_averages(creators: list[IssueCreatorStats]) -> IssueCreatorSta
     comment_before = [c.avg_comment_count_before_pr for c in creators if c.avg_comment_count_before_pr is not None]
     prs_per = [c.avg_prs_per_issue for c in creators if c.avg_prs_per_issue is not None]
     first_pr_hours = [c.avg_time_to_first_pr_hours for c in creators if c.avg_time_to_first_pr_hours is not None]
+    # Sample-weighted mean so the team-avg downstream-PR rounds matches what
+    # you'd get merging every creator's PRs together — simple averages weight
+    # creators who barely contributed the same as prolific ones.
+    downstream_samples = [
+        (c.avg_downstream_pr_review_rounds, c.sample_size_downstream_prs)
+        for c in creators
+        if c.avg_downstream_pr_review_rounds is not None and c.sample_size_downstream_prs > 0
+    ]
+    total_sample = sum(n for _, n in downstream_samples)
+    avg_downstream = (
+        round(sum(v * n for v, n in downstream_samples) / total_sample, 2)
+        if total_sample > 0
+        else None
+    )
 
     return IssueCreatorStats(
         github_username="__team_average__",
@@ -3474,6 +3516,8 @@ def _compute_team_averages(creators: list[IssueCreatorStats]) -> IssueCreatorSta
         avg_time_to_first_pr_hours=(
             round(statistics.mean(first_pr_hours), 1) if first_pr_hours else None
         ),
+        avg_downstream_pr_review_rounds=avg_downstream,
+        sample_size_downstream_prs=total_sample,
     )
 
 
@@ -3728,6 +3772,46 @@ async def get_ci_stats(
     )
     check_stats_rows = (await db.execute(check_stats_q)).all()
 
+    # Resolve a representative html_url for each check name — pick the most
+    # recent failing run so the link lands on an actual failure page. Falls
+    # back to the most recent run with a URL if no failure had one stored.
+    flaky_failure_latest = (
+        select(
+            PRCheckRun.check_name,
+            func.max(PRCheckRun.id).label("max_id"),
+        )
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(
+            *pr_conditions,
+            PRCheckRun.html_url.isnot(None),
+            PRCheckRun.conclusion == "failure",
+        )
+        .group_by(PRCheckRun.check_name)
+        .subquery()
+    )
+    flaky_any_latest = (
+        select(
+            PRCheckRun.check_name,
+            func.max(PRCheckRun.id).label("max_id"),
+        )
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .where(*pr_conditions, PRCheckRun.html_url.isnot(None))
+        .group_by(PRCheckRun.check_name)
+        .subquery()
+    )
+    flaky_failure_urls = dict(
+        (await db.execute(
+            select(PRCheckRun.check_name, PRCheckRun.html_url)
+            .join(flaky_failure_latest, PRCheckRun.id == flaky_failure_latest.c.max_id)
+        )).all()
+    )
+    any_urls = dict(
+        (await db.execute(
+            select(PRCheckRun.check_name, PRCheckRun.html_url)
+            .join(flaky_any_latest, PRCheckRun.id == flaky_any_latest.c.max_id)
+        )).all()
+    )
+
     flaky_checks: list[FlakyCheck] = []
     for name, total, failures in check_stats_rows:
         rate = failures / total if total else 0
@@ -3737,6 +3821,7 @@ async def get_ci_stats(
                     name=name,
                     failure_rate=round(rate, 3),
                     total_runs=total,
+                    html_url=flaky_failure_urls.get(name) or any_urls.get(name),
                 )
             )
     flaky_checks.sort(key=lambda c: c.failure_rate, reverse=True)
@@ -3763,7 +3848,11 @@ async def get_ci_stats(
     )
     slowest_rows = (await db.execute(slowest_q)).all()
     slowest_checks = [
-        SlowestCheck(name=name, avg_duration_s=round(float(avg_d), 1))
+        SlowestCheck(
+            name=name,
+            avg_duration_s=round(float(avg_d), 1),
+            html_url=any_urls.get(name),
+        )
         for name, avg_d in slowest_rows
     ]
 

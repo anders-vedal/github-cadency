@@ -17,7 +17,15 @@ from app.schemas.schemas import (
     DeveloperCreate,
     DeveloperResponse,
     DeveloperUpdateAdmin,
+    LinearCreatorProfile,
+    LinearShepherdProfile,
+    LinearWorkerProfile,
     UnassignedRoleCountResponse,
+)
+from app.services.developer_linear import (
+    get_developer_creator_profile,
+    get_developer_shepherd_profile,
+    get_developer_worker_profile,
 )
 from app.services.roles import validate_role_key
 from app.services.stats import get_activity_summary
@@ -219,6 +227,81 @@ async def get_deactivation_impact(
         open_issues=open_issues,
         open_branches=open_branches,
     )
+
+
+def _assert_self_or_admin(dev: Developer, user: AuthUser) -> None:
+    """Phase 05 visibility gate: creator/shepherd signals are self+admin only."""
+    is_admin = user.app_role == AppRole.admin
+    is_self = user.developer_id == dev.id
+    if not (is_admin or is_self):
+        raise HTTPException(
+            status_code=403,
+            detail="Linear creator/worker/shepherd profiles are visible to admins and self only.",
+        )
+
+
+@router.get(
+    "/developers/{developer_id}/linear-creator-profile",
+    response_model=LinearCreatorProfile,
+)
+async def linear_creator_profile(
+    developer_id: int,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    dev = await db.get(Developer, developer_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    _assert_self_or_admin(dev, user)
+    data = await get_developer_creator_profile(
+        db, developer_id, date_from=date_from, date_to=date_to
+    )
+    return LinearCreatorProfile(**data)
+
+
+@router.get(
+    "/developers/{developer_id}/linear-worker-profile",
+    response_model=LinearWorkerProfile,
+)
+async def linear_worker_profile(
+    developer_id: int,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    dev = await db.get(Developer, developer_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    # Worker profile is less sensitive — admin or self only (matches spec)
+    _assert_self_or_admin(dev, user)
+    data = await get_developer_worker_profile(
+        db, developer_id, date_from=date_from, date_to=date_to
+    )
+    return LinearWorkerProfile(**data)
+
+
+@router.get(
+    "/developers/{developer_id}/linear-shepherd-profile",
+    response_model=LinearShepherdProfile,
+)
+async def linear_shepherd_profile(
+    developer_id: int,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    dev = await db.get(Developer, developer_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    _assert_self_or_admin(dev, user)
+    data = await get_developer_shepherd_profile(
+        db, developer_id, date_from=date_from, date_to=date_to
+    )
+    return LinearShepherdProfile(**data)
 
 
 @router.delete(

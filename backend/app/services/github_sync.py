@@ -475,6 +475,36 @@ async def github_get_paginated(
     return all_items
 
 
+async def fetch_installation_repositories(
+    client: httpx.AsyncClient, ctx: SyncContext | None = None
+) -> list[dict]:
+    """Fetch all repos accessible to the GitHub App installation.
+
+    Uses ``/installation/repositories`` so this works for both User and Org
+    installations. Response shape is ``{"total_count": N, "repositories": [...]}``
+    so we unwrap ``.repositories`` and paginate manually.
+    """
+    all_repos: list[dict] = []
+    page = 1
+    per_page = 100
+    while True:
+        resp = await github_get(
+            client,
+            "/installation/repositories",
+            {"per_page": str(per_page), "page": str(page)},
+            ctx=ctx,
+        )
+        data = resp.json()
+        repos = data.get("repositories") or []
+        if not repos:
+            break
+        all_repos.extend(repos)
+        if len(repos) < per_page:
+            break
+        page += 1
+    return all_repos
+
+
 # --- Author Resolution ---
 
 
@@ -566,69 +596,6 @@ async def resolve_author(
     await db.flush()
     logger.info("Auto-created developer", github_username=github_username, developer_id=dev.id, event_type="system.sync")
     return dev.id
-
-
-# --- Contributor Sync ---
-
-
-async def sync_org_contributors(
-    db: AsyncSession, client: httpx.AsyncClient, ctx: SyncContext | None = None,
-) -> int:
-    """Fetch all org members from GitHub and upsert them as developers.
-
-    Returns the number of newly created developers.
-    """
-    if ctx:
-        _add_log(ctx, "info", "Syncing org members...")
-
-    members_data = await github_get_paginated(
-        client,
-        f"/orgs/{settings.github_org}/members",
-        {},
-        ctx=ctx,
-    )
-
-    created = 0
-    for member in members_data:
-        login = member.get("login")
-        if not login:
-            continue
-
-        existing = await db.execute(
-            select(Developer).where(Developer.github_username == login)
-        )
-        existing_dev = existing.scalar_one_or_none()
-        if existing_dev is not None:
-            if not existing_dev.is_active:
-                existing_dev.is_active = True
-                logger.warning("Auto-reactivated inactive developer", login=login, developer_id=existing_dev.id, event_type="system.sync")
-                if ctx:
-                    _add_log(ctx, "warn", f"Auto-reactivated inactive developer '{login}' — found in org members")
-            continue
-
-        # Fetch full profile to get name, email, location
-        profile = await _fetch_user_profile(client, login, ctx=ctx)
-
-        display_name = (profile or {}).get("name") or login
-        dev = Developer(
-            github_username=login,
-            display_name=display_name,
-            avatar_url=member.get("avatar_url"),
-            app_role="developer",
-            is_active=True,
-        )
-        if profile:
-            _apply_profile_to_developer(dev, profile)
-        db.add(dev)
-        created += 1
-
-    if created:
-        await db.flush()
-
-    if ctx:
-        _add_log(ctx, "info", f"Org members: {len(members_data)} found, {created} new developers created")
-    logger.info("sync_org_contributors complete", members=len(members_data), created=created, event_type="system.sync")
-    return created
 
 
 async def backfill_author_links(db: AsyncSession) -> dict[str, int]:
@@ -737,10 +704,12 @@ async def backfill_author_links(db: AsyncSession) -> dict[str, int]:
 
 
 async def run_contributor_sync() -> SyncEvent:
-    """Standalone contributor sync with SyncEvent tracking.
+    """Standalone contributor backfill with SyncEvent tracking.
 
-    Creates a SyncEvent(sync_type="contributors"), fetches org members,
-    backfills author links, and records completion/failure.
+    Creates a SyncEvent(sync_type="contributors") and re-runs
+    ``backfill_author_links`` to repair any NULL author/reviewer/assignee FKs
+    on existing rows. Contributors themselves are materialised on-demand by
+    ``resolve_author`` during the main sync — no separate fetch needed.
     """
     async with AsyncSessionLocal() as db:
         # Concurrency guard (safety net for TOCTOU race with the API check)
@@ -776,11 +745,6 @@ async def run_contributor_sync() -> SyncEvent:
 
         cancelled = False
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                ctx.client = client
-                created = await sync_org_contributors(db, client, ctx=ctx)
-                await db.commit()
-
             await _check_cancel(ctx)
 
             _add_log(ctx, "info", "Backfilling author links...")
@@ -792,8 +756,8 @@ async def run_contributor_sync() -> SyncEvent:
                 _add_log(ctx, "info", f"Backfilled {total_backfilled} author links")
 
             sync_event.status = "completed"
-            sync_event.repos_synced = created
-            _add_log(ctx, "info", f"Contributor sync complete: {created} new developers")
+            sync_event.repos_synced = 0
+            _add_log(ctx, "info", f"Contributor sync complete: {total_backfilled} author links backfilled")
 
         except SyncCancelled:
             cancelled = True
@@ -1433,6 +1397,7 @@ async def upsert_check_run(
         db.add(check_run)
 
     check_run.conclusion = check_data.get("conclusion")
+    check_run.html_url = check_data.get("html_url") or check_data.get("details_url")
 
     for field in ("started_at", "completed_at"):
         val = check_data.get(field)
@@ -1756,6 +1721,173 @@ async def detect_deployment_failures(
 
 BATCH_SIZE = 50
 
+# Phase 09 timeline batching: GitHub's aliased-PR query tops out around 50 PRs
+# per request before hitting node-limit errors. Matches the ceiling in
+# `github_timeline.fetch_pr_timeline_batch`.
+TIMELINE_BATCH_SIZE = 50
+
+
+async def _fetch_codeowners_text(
+    client: httpx.AsyncClient,
+    repo_full_name: str,
+    ctx: SyncContext,
+) -> str | None:
+    """Fetch CODEOWNERS content from the canonical locations.
+
+    Returns the first file found (as decoded text) or ``None`` if none exist.
+    GitHub hosts CODEOWNERS in one of three places; we probe in priority order
+    and stop at the first hit. A 404 is the healthy "no file" case — any other
+    error bubbles up as a warning in the caller.
+    """
+    from base64 import b64decode
+
+    for path in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+        try:
+            resp = await github_get(
+                client, f"/repos/{repo_full_name}/contents/{path}", ctx=ctx
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                continue
+            raise
+        body = resp.json()
+        content = body.get("content") or ""
+        encoding = body.get("encoding") or "base64"
+        if encoding == "base64":
+            try:
+                return b64decode(content).decode("utf-8", errors="replace")
+            except Exception:
+                return None
+        return content
+    return None
+
+
+async def _enrich_pr_timelines(
+    ctx: SyncContext,
+    repo: Repository,
+    pr_items: list[dict],
+) -> None:
+    """Fetch timeline events for PRs synced in this repo, persist, derive aggregates.
+
+    Also detects CODEOWNERS bypass on merged PRs with an owners file present.
+    Smart-skip already excluded unchanged PRs from ``pr_items`` upstream; we
+    still re-scope here to PRs that exist in the DB with their current numbers.
+    """
+    from app.services.codeowners import check_bypass, parse_codeowners
+    from app.services.github_timeline import (
+        derive_pr_aggregates,
+        fetch_pr_timeline_batch,
+        persist_timeline_events,
+    )
+
+    db = ctx.db
+    client = ctx.client
+    owner, _, name = repo.full_name.partition("/")
+    if not (owner and name):
+        return
+
+    pr_numbers = [int(p["number"]) for p in pr_items if p.get("number")]
+    if not pr_numbers:
+        return
+
+    # Load the DB rows once so we can match GraphQL results to PRs without
+    # N round trips. This covers both newly-synced and smart-skipped PRs —
+    # timeline is idempotent and re-deriving aggregates is cheap.
+    pr_rows = (
+        await db.execute(
+            select(PullRequest).where(
+                PullRequest.repo_id == repo.id,
+                PullRequest.number.in_(pr_numbers),
+            )
+        )
+    ).scalars().all()
+    pr_by_number: dict[int, PullRequest] = {pr.number: pr for pr in pr_rows}
+
+    token = await github_auth.get_installation_token()
+
+    # CODEOWNERS (best-effort: missing file is normal)
+    codeowners_rules: list[tuple[str, list[str]]] = []
+    try:
+        text = await _fetch_codeowners_text(client, repo.full_name, ctx)
+        if text:
+            codeowners_rules = parse_codeowners(text)
+    except Exception as exc:
+        ctx.sync_logger.warning(
+            "CODEOWNERS fetch failed",
+            repo=repo.full_name,
+            error=str(exc),
+            event_type="system.github_api",
+        )
+
+    ctx.sync_event.current_step = "enriching_pr_timelines"
+    await db.commit()
+    _add_log(
+        ctx, "info",
+        f"Fetching PR timeline for {len(pr_numbers)} PRs",
+        repo=repo.full_name,
+    )
+
+    total_events = 0
+    for i in range(0, len(pr_numbers), TIMELINE_BATCH_SIZE):
+        chunk = pr_numbers[i : i + TIMELINE_BATCH_SIZE]
+        nodes_by_pr = await fetch_pr_timeline_batch(
+            client, token, owner, name, chunk, batch_size=TIMELINE_BATCH_SIZE
+        )
+        for num, nodes in nodes_by_pr.items():
+            pr = pr_by_number.get(num)
+            if pr is None:
+                continue
+            counts = await persist_timeline_events(db, pr, nodes, client=client)
+            total_events += counts.get("inserted", 0) + counts.get("updated", 0)
+            await derive_pr_aggregates(db, pr)
+
+            # CODEOWNERS bypass — only meaningful for merged PRs with rules + changed files
+            if codeowners_rules and pr.merged_at is not None:
+                await _set_codeowners_bypass(db, pr, codeowners_rules)
+
+        await db.commit()
+        await _check_cancel(ctx)
+
+    _add_log(
+        ctx, "info",
+        f"PR timeline: {total_events} events synced",
+        repo=repo.full_name,
+    )
+
+
+async def _set_codeowners_bypass(
+    db: AsyncSession,
+    pr: PullRequest,
+    rules: list[tuple[str, list[str]]],
+) -> None:
+    """Run CODEOWNERS bypass detection for a single merged PR."""
+    from app.services.codeowners import check_bypass
+
+    # Changed files for this PR
+    files_result = await db.execute(
+        select(PRFile.filename).where(PRFile.pr_id == pr.id)
+    )
+    changed_paths = [row[0] for row in files_result.all() if row[0]]
+    if not changed_paths:
+        return
+
+    # Approver tokens: reviewers who submitted an APPROVED review.
+    approvers_result = await db.execute(
+        select(PRReview.reviewer_github_username).where(
+            PRReview.pr_id == pr.id,
+            PRReview.state == "APPROVED",
+            PRReview.reviewer_github_username.isnot(None),
+        )
+    )
+    approver_tokens = [row[0] for row in approvers_result.all() if row[0]]
+
+    pr.codeowners_bypass = check_bypass(
+        changed_paths=changed_paths,
+        rules=rules,
+        approver_tokens=approver_tokens,
+        merged=True,
+    )
+
 
 async def sync_repo(
     ctx: SyncContext,
@@ -1938,6 +2070,23 @@ async def sync_repo(
                 repo=repo.full_name,
             )
 
+    # --- PR timeline enrichment (Phase 09) ---
+    # After PRs are upserted, fetch timeline events + derive aggregates + detect
+    # CODEOWNERS bypass. Done at this step boundary (not per-batch) so one GraphQL
+    # fault doesn't corrupt mid-sync state.
+    if prs_upserted > 0:
+        try:
+            await _enrich_pr_timelines(ctx, repo, pr_items)
+        except Exception as exc:  # best-effort: never break the rest of sync
+            warn_msg = f"pr_timeline: {exc}"
+            warnings.append(warn_msg)
+            ctx.sync_logger.warning(
+                "PR timeline enrichment failed",
+                repo=repo.full_name,
+                error=str(exc),
+                event_type="system.sync",
+            )
+
     # --- Issues ---
     if prs_skipped:
         _add_log(
@@ -2063,17 +2212,17 @@ async def sync_repo(
 
 
 async def discover_org_repos(db: AsyncSession) -> list[Repository]:
-    """Fetch all repos from the GitHub org and upsert them into the database.
+    """Fetch all repos accessible to the GitHub App installation and upsert them.
 
-    This does NOT sync PRs/issues — it only discovers repos so the UI can
-    display them for selection before the first sync.
+    Uses the installation-scoped ``/installation/repositories`` endpoint, which
+    works uniformly for both User and Org installations. Does NOT sync PRs /
+    issues — only discovers repos so the UI can display them for selection.
+
+    Name kept as ``discover_org_repos`` for API stability; in practice the scope
+    is "whatever the installation can see".
     """
     async with httpx.AsyncClient(timeout=30.0) as client:
-        repos_data = await github_get_paginated(
-            client,
-            f"/orgs/{settings.github_org}/repos",
-            {"type": "all", "sort": "updated"},
-        )
+        repos_data = await fetch_installation_repositories(client)
         for repo_data in repos_data:
             await upsert_repo(db, repo_data)
             await db.flush()
@@ -2178,13 +2327,8 @@ async def run_sync(
                     )
                     tracked_repos = list(result.scalars().all())
                 else:
-                    # Fetch org repos from GitHub and upsert all
-                    repos_data = await github_get_paginated(
-                        client,
-                        f"/orgs/{settings.github_org}/repos",
-                        {"type": "all", "sort": "updated"},
-                        ctx=ctx,
-                    )
+                    # Fetch installation repos from GitHub and upsert all
+                    repos_data = await fetch_installation_repositories(client, ctx=ctx)
                     for repo_data in repos_data:
                         repo = await upsert_repo(db, repo_data)
                         await db.flush()
@@ -2197,17 +2341,9 @@ async def run_sync(
                     )
                     tracked_repos = list(result.scalars().all())
 
-                # Sync org contributors before processing repos
-                try:
-                    await sync_org_contributors(db, client, ctx=ctx)
-                    await db.commit()
-                except Exception as e:
-                    ctx.sync_logger.warning("sync_org_contributors failed", error=str(e), event_type="system.sync")
-                    _add_log(ctx, "warn", f"Contributor sync failed: {e}")
-                    _append_jsonb(
-                        sync_event, "errors",
-                        make_sync_error(step="sync_contributors", exception=e),
-                    )
+                # Contributors are materialised on-demand by resolve_author
+                # as we walk PRs / reviews / comments, so there's no separate
+                # org-wide contributor fetch here.
 
                 sync_event.total_repos = len(tracked_repos)
                 await db.commit()

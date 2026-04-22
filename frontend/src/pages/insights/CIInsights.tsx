@@ -9,7 +9,7 @@ import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { HelpCircle, Clock, TriangleAlert } from 'lucide-react'
+import { HelpCircle, Clock, TriangleAlert, ExternalLink } from 'lucide-react'
 import {
   Table,
   TableBody,
@@ -23,6 +23,23 @@ function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`
   if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`
   return `${(seconds / 3600).toFixed(1)}h`
+}
+
+function CheckNameCell({ name, url }: { name: string; url?: string | null }) {
+  if (!url) {
+    return <span className="font-mono text-sm">{name}</span>
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-1 font-mono text-sm text-primary hover:underline"
+    >
+      {name}
+      <ExternalLink className="h-3 w-3" />
+    </a>
+  )
 }
 
 export default function CIInsights() {
@@ -126,7 +143,9 @@ export default function CIInsights() {
               <TableBody>
                 {data.flaky_checks.map((c) => (
                   <TableRow key={c.name}>
-                    <TableCell className="font-mono text-sm">{c.name}</TableCell>
+                    <TableCell>
+                      <CheckNameCell name={c.name} url={c.html_url} />
+                    </TableCell>
                     <TableCell className="text-right font-medium text-red-600 dark:text-red-400">
                       {(c.failure_rate * 100).toFixed(1)}%
                     </TableCell>
@@ -171,7 +190,9 @@ export default function CIInsights() {
               <TableBody>
                 {data.slowest_checks.map((c) => (
                   <TableRow key={c.name}>
-                    <TableCell className="font-mono text-sm">{c.name}</TableCell>
+                    <TableCell>
+                      <CheckNameCell name={c.name} url={c.html_url} />
+                    </TableCell>
                     <TableCell className="text-right font-medium">
                       {formatDuration(c.avg_duration_s)}
                     </TableCell>

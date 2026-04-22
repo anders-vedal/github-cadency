@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useDoraMetrics } from '@/hooks/useStats'
+import { useDoraV2 } from '@/hooks/useDoraV2'
 import { useRepos } from '@/hooks/useSync'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
@@ -20,6 +21,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
 
 const bandColors: Record<string, string> = {
   elite: 'text-emerald-600 dark:text-emerald-400',
@@ -61,6 +63,26 @@ function formatFailureVia(via: string | null): string {
   return map[via] ?? via
 }
 
+type CohortFilter = 'all' | 'human' | 'ai_reviewed' | 'ai_authored' | 'hybrid'
+
+const COHORT_OPTIONS: { value: CohortFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'human', label: 'Human' },
+  { value: 'ai_reviewed', label: 'AI-reviewed' },
+  { value: 'ai_authored', label: 'AI-authored' },
+  { value: 'hybrid', label: 'Hybrid' },
+]
+
+function formatReworkRate(v: number | null | undefined): string {
+  if (v == null) return '—'
+  return `${v.toFixed(1)}%`
+}
+
+function formatShare(v: number | null | undefined): string {
+  if (v == null) return '—'
+  return `${v.toFixed(1)}%`
+}
+
 export default function DoraMetrics() {
   const { dateFrom, dateTo } = useDateRange()
   const { data: repos } = useRepos()
@@ -68,6 +90,7 @@ export default function DoraMetrics() {
   const [selectedRepoId, setSelectedRepoId] = useState<number | null>(
     Number(searchParams.get('repo_id')) || null,
   )
+  const [cohort, setCohort] = useState<CohortFilter>('all')
 
   const trackedRepos = useMemo(
     () => (repos ?? []).filter((r) => r.is_tracked),
@@ -79,6 +102,21 @@ export default function DoraMetrics() {
     dateTo,
     selectedRepoId,
   )
+  // v2 ships separately and adds rework rate + cohort split. Backend tolerates
+  // cohort="all" as the default; the toggle only exists for visualization.
+  const { data: v2Data } = useDoraV2(dateFrom, dateTo, cohort)
+
+  // AI share of volume = sum of AI-touched cohorts. Used on the CFR/rework cards
+  // to warn readers when the number blends human + AI-heavy PRs.
+  const aiSharePct = useMemo(() => {
+    const c = v2Data?.cohorts
+    if (!c) return null
+    const ai =
+      (c.ai_reviewed?.share_pct ?? 0) +
+      (c.ai_authored?.share_pct ?? 0) +
+      (c.hybrid?.share_pct ?? 0)
+    return Math.round(ai * 10) / 10
+  }, [v2Data])
 
   if (isError) {
     return <ErrorCard message="Could not load DORA metrics." onRetry={refetch} />
@@ -100,19 +138,51 @@ export default function DoraMetrics() {
             </TooltipContent>
           </Tooltip>
         </div>
-        <select
-          className="rounded-md border bg-background px-3 py-1.5 text-sm"
-          value={selectedRepoId ?? ''}
-          onChange={(e) => setSelectedRepoId(Number(e.target.value) || null)}
-        >
-          <option value="">All Repos</option>
-          {trackedRepos.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.full_name || r.name}
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-3">
+          <div className="inline-flex rounded-md border p-0.5" role="tablist" aria-label="Cohort">
+            {COHORT_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                role="tab"
+                aria-selected={cohort === opt.value}
+                onClick={() => setCohort(opt.value)}
+                className={cn(
+                  'rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                  cohort === opt.value
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <select
+            className="rounded-md border bg-background px-3 py-1.5 text-sm"
+            value={selectedRepoId ?? ''}
+            onChange={(e) => setSelectedRepoId(Number(e.target.value) || null)}
+          >
+            <option value="">All Repos</option>
+            {trackedRepos.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.full_name || r.name}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
+      {aiSharePct != null && aiSharePct > 0 && cohort === 'all' && (
+        <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2.5 text-xs">
+          <Badge variant="outline" className="text-[11px]">
+            {aiSharePct}% AI-touched
+          </Badge>
+          <span className="text-muted-foreground">
+            AI-reviewed and AI-authored PRs are blended into these numbers. Switch
+            cohorts above or see the comparison below.
+          </span>
+        </div>
+      )}
 
       {noDeployments ? (
         <Card>
@@ -237,6 +307,66 @@ export default function DoraMetrics() {
                       {bandLabels[data.mttr_band] ?? data.mttr_band}
                     </p>
                   </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {/* v2 additions: rework rate stat + cohort comparison */}
+          {v2Data && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <StatCard
+                title="Rework Rate"
+                value={formatReworkRate(v2Data.stability.rework_rate)}
+                subtitle={`Band: ${bandLabels[v2Data.bands.rework_rate] ?? v2Data.bands.rework_rate}`}
+                tooltip="Share of merged PRs followed by another PR touching the same file within 7 days. High rework rate = merged too fast."
+              />
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <CardTitle>Cohort comparison</CardTitle>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        AI-cohort split: each row shows how many PRs that cohort merged in range, its rework rate, and its share of total volume. Blending these masks bimodal cycle-time distributions.
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Cohort</TableHead>
+                        <TableHead className="text-right">Merges</TableHead>
+                        <TableHead className="text-right">Rework</TableHead>
+                        <TableHead className="text-right">Share</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(['human', 'ai_reviewed', 'ai_authored', 'hybrid'] as const).map((key) => {
+                        const row = v2Data.cohorts[key]
+                        return (
+                          <TableRow key={key}>
+                            <TableCell className="capitalize">
+                              {key.replace('_', '-')}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {row?.merges ?? 0}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {row ? formatReworkRate(row.rework_rate) : '—'}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {row ? formatShare(row.share_pct) : '—'}
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })}
+                    </TableBody>
+                  </Table>
                 </CardContent>
               </Card>
             </div>

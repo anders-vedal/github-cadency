@@ -17,6 +17,10 @@ import { HelpCircle, Settings } from 'lucide-react'
 import RelationshipsCard from '@/components/RelationshipsCard'
 import WorksWithSection from '@/components/WorksWithSection'
 import SlackPreferencesSection from '@/components/SlackPreferencesSection'
+import LinearCreatorSection from '@/components/developer/LinearCreatorSection'
+import LinearWorkerSection from '@/components/developer/LinearWorkerSection'
+import LinearShepherdSection from '@/components/developer/LinearShepherdSection'
+import { useIntegrations, useIssueSource } from '@/hooks/useIntegrations'
 import DeactivateDialog from '@/components/DeactivateDialog'
 import ErrorCard from '@/components/ErrorCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
@@ -437,6 +441,10 @@ export default function DeveloperDetail() {
   const { data: aiHistory } = useAIHistory()
   const { data: sprintSummary } = useDeveloperSprintSummary(devId)
   const { user, isAdmin } = useAuth()
+  const { data: integrations } = useIntegrations()
+  const { data: issueSource } = useIssueSource()
+  const hasLinear = integrations?.some((i) => i.type === 'linear' && i.status === 'active')
+  const isLinearPrimary = !!hasLinear && issueSource?.source === 'linear'
   const { data: goals } = useGoals(devId)
   const updateSelfGoal = useUpdateSelfGoal()
   const [editOpen, setEditOpen] = useState(false)
@@ -565,6 +573,38 @@ export default function DeveloperDetail() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Linear Creator / Worker / Shepherd sections — only when Linear is primary */}
+      {isLinearPrimary && (isAdmin || isOwnPage) && (
+        <div className="space-y-3">
+          <h2 className="text-lg font-semibold">Linear creator</h2>
+          <p className="text-sm text-muted-foreground">
+            How clear are the tickets you write? — Ticket clarity is measured by review
+            rounds on downstream PRs. Self-reflection, not a ranking.
+          </p>
+          <LinearCreatorSection developerId={devId} enabled={isLinearPrimary} />
+        </div>
+      )}
+
+      {isLinearPrimary && (isAdmin || isOwnPage) && (
+        <div className="space-y-3">
+          <h2 className="text-lg font-semibold">Linear worker</h2>
+          <p className="text-sm text-muted-foreground">
+            Issues you execute: self-picked vs pushed, triage-to-start, cycle time.
+          </p>
+          <LinearWorkerSection developerId={devId} enabled={isLinearPrimary} />
+        </div>
+      )}
+
+      {isLinearPrimary && (isAdmin || isOwnPage) && (
+        <div className="space-y-3">
+          <h2 className="text-lg font-semibold">Linear shepherd</h2>
+          <p className="text-sm text-muted-foreground">
+            Which collaborators do you engage with most, and across which teams?
+          </p>
+          <LinearShepherdSection developerId={devId} enabled={isLinearPrimary} />
+        </div>
       )}
 
       {/* Edit Profile Dialog (admin only) */}

@@ -97,8 +97,18 @@ async def callback(
         gh_user = user_resp.json()
         github_username = gh_user["login"]
 
-        # Check org membership (if GITHUB_ORG is configured)
-        if settings.github_org:
+        # Gate sign-in. Priority:
+        # 1. DEVPULSE_ALLOWED_USERS — explicit allowlist (preferred for User-account installations)
+        # 2. GITHUB_ORG — legacy org-membership check (preserved for back-compat)
+        # 3. Neither set → fail closed so a misconfigured deploy doesn't accidentally open sign-up
+        allowed = settings.allowed_users_list
+        if allowed:
+            if github_username.lower() not in allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied: {github_username} is not in DEVPULSE_ALLOWED_USERS",
+                )
+        elif settings.github_org:
             org_resp = await client.get(
                 f"https://api.github.com/orgs/{settings.github_org}/members/{github_username}",
                 headers={
@@ -111,6 +121,11 @@ async def callback(
                     status_code=403,
                     detail=f"Access denied: {github_username} is not a member of the {settings.github_org} organization",
                 )
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="Sign-in is not configured: set DEVPULSE_ALLOWED_USERS (comma-separated GitHub usernames) or GITHUB_ORG.",
+            )
 
     avatar_url = gh_user.get("avatar_url")
     display_name = gh_user.get("name") or github_username

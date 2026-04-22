@@ -607,6 +607,11 @@ class IssueCreatorStats(BaseModel):
     avg_prs_per_issue: float | None
     issues_with_body_under_100_chars: int
     avg_time_to_first_pr_hours: float | None
+    # Linear-only ticket-clarity signal (Phase 05): downstream PR review-round-count
+    # averaged across this creator's linked PRs, with sample size so small-N
+    # averages are visibly discounted. Both None/0 when source is GitHub.
+    avg_downstream_pr_review_rounds: float | None = None
+    sample_size_downstream_prs: int = 0
 
 
 class IssueCreatorStatsResponse(BaseModel):
@@ -1084,11 +1089,13 @@ class FlakyCheck(BaseModel):
     name: str
     failure_rate: float
     total_runs: int
+    html_url: str | None = None
 
 
 class SlowestCheck(BaseModel):
     name: str
     avg_duration_s: float
+    html_url: str | None = None
 
 
 class CIStatsResponse(BaseModel):
@@ -1689,6 +1696,433 @@ class IntegrationSyncStatusResponse(BaseModel):
 class IssueSourceResponse(BaseModel):
     source: str
     integration_id: int | None = None
+
+
+# --- Phase 02: Linkage Quality ---
+
+
+class LinkQualityUnlinkedPR(BaseModel):
+    pr_id: int
+    number: int
+    title: str
+    created_at: str | None = None
+    html_url: str | None = None
+    author_github_username: str | None = None
+    repo: str
+
+
+class LinkQualityDisagreementLink(BaseModel):
+    external_issue_id: int
+    identifier: str
+    link_source: str
+    link_confidence: str
+
+
+class LinkQualityDisagreementPR(BaseModel):
+    pr_id: int
+    number: int
+    title: str
+    html_url: str | None = None
+    repo: str
+    links: list[LinkQualityDisagreementLink] = []
+
+
+class LinkQualitySummary(BaseModel):
+    total_prs: int
+    linked_prs: int
+    linkage_rate: float
+    by_confidence: dict[str, int]
+    by_source: dict[str, int]
+    unlinked_recent: list[LinkQualityUnlinkedPR] = []
+    disagreement_prs: list[LinkQualityDisagreementPR] = []
+
+
+class LinkageRateTrendBucket(BaseModel):
+    week_start: str
+    total: int
+    linked: int
+    linkage_rate: float | None = None
+
+
+class LinkageRateTrendResponse(BaseModel):
+    buckets: list[LinkageRateTrendBucket]
+
+
+class RelinkResponse(BaseModel):
+    sync_event_id: int
+    status: str
+    new_links: int | None = None
+
+
+# --- Phase 03: Linear Usage Health ---
+
+
+class LinearHealthAdoption(BaseModel):
+    linked_pr_count: int
+    total_pr_count: int
+    linkage_rate: float
+    target: float
+    status: str
+
+
+class LinearHealthSpecQuality(BaseModel):
+    median_description_length: int
+    median_comments_before_first_pr: float
+    high_comment_issue_pct: float
+    status: str
+
+
+class LinearHealthAutonomy(BaseModel):
+    self_picked_count: int
+    pushed_count: int
+    self_picked_pct: float
+    median_time_to_assign_s: int | None = None
+    status: str
+
+
+class LinearHealthDialogue(BaseModel):
+    median_comments_per_issue: float
+    p90_comments_per_issue: int
+    silent_issue_pct: float
+    distribution_shape: str
+    status: str
+
+
+class LinearHealthCreatorRow(BaseModel):
+    developer_id: int
+    developer_name: str
+    issues_created: int
+    avg_comments_on_their_issues: float
+    avg_downstream_pr_review_rounds: float
+    sample_size: int
+
+
+class LinearHealthCreatorOutcome(BaseModel):
+    top_creators: list[LinearHealthCreatorRow] = []
+
+
+class LinearUsageHealthResponse(BaseModel):
+    adoption: LinearHealthAdoption
+    spec_quality: LinearHealthSpecQuality
+    autonomy: LinearHealthAutonomy
+    dialogue_health: LinearHealthDialogue
+    creator_outcome: LinearHealthCreatorOutcome
+
+
+# --- Phase 04: Issue Conversations ---
+
+
+class ChattyIssueRef(BaseModel):
+    id: int
+    name: str | None = None
+
+
+class ChattyIssueLinkedPR(BaseModel):
+    pr_id: int
+    number: int
+    repo: str | None = None
+    review_round_count: int | None = None
+    merged_at: str | None = None
+
+
+class ChattyIssueRow(BaseModel):
+    issue_id: int
+    identifier: str
+    title: str
+    url: str | None = None
+    creator: ChattyIssueRef | None = None
+    assignee: ChattyIssueRef | None = None
+    project: ChattyIssueRef | None = None
+    priority_label: str | None = None
+    estimate: float | None = None
+    comment_count: int
+    unique_participants: int
+    first_response_s: int | None = None
+    created_at: str | None = None
+    status: str | None = None
+    linked_prs: list[ChattyIssueLinkedPR] = []
+    avg_linked_pr_review_rounds: float | None = None
+
+
+class ConversationsScatterPoint(BaseModel):
+    comment_count: int
+    review_rounds: int
+    issue_identifier: str
+    pr_number: int
+
+
+class FirstResponseHistogramBucket(BaseModel):
+    bucket: str
+    count: int
+
+
+class ParticipantDistributionBucket(BaseModel):
+    participants: str
+    count: int
+
+
+# --- Phase 06: Flow analytics ---
+
+
+class StatusTimeDistribution(BaseModel):
+    status_category: str
+    p50_s: int
+    p75_s: int
+    p90_s: int
+    p95_s: int
+    sample_size: int
+
+
+class StatusRegression(BaseModel):
+    issue_id: int
+    identifier: str
+    title: str
+    url: str | None = None
+    from_status: str
+    to_status: str
+    changed_at: str | None = None
+    actor_id: int | None = None
+    actor_name: str | None = None
+
+
+class TriageBounce(BaseModel):
+    issue_id: int
+    identifier: str
+    title: str
+    url: str | None = None
+
+
+class RefinementChurnDistribution(BaseModel):
+    p50: int
+    p90: int
+    mean: float
+    total_issues_with_churn: int
+
+
+class RefinementChurnRow(BaseModel):
+    issue_id: int
+    identifier: str
+    title: str
+    url: str | None = None
+    churn_events: int
+
+
+class RefinementChurnResponse(BaseModel):
+    distribution: RefinementChurnDistribution
+    top: list[RefinementChurnRow] = []
+
+
+class FlowReadinessResponse(BaseModel):
+    ready: bool
+    days_of_history: int
+    issues_with_history: int
+    threshold_days: int
+    threshold_issues: int
+
+
+# --- Phase 07: Bottleneck intelligence ---
+
+
+class CumulativeFlowPoint(BaseModel):
+    date: str
+    triage: int = 0
+    backlog: int = 0
+    todo: int = 0
+    in_progress: int = 0
+    in_review: int = 0
+    done: int = 0
+    cancelled: int = 0
+
+
+class WipIssueRef(BaseModel):
+    id: int
+    identifier: str
+    title: str
+
+
+class WipOverLimit(BaseModel):
+    developer_id: int
+    developer_name: str
+    in_progress_count: int
+    threshold: int
+    issues: list[WipIssueRef] = []
+
+
+class ReviewLoadTopRow(BaseModel):
+    reviewer_id: int
+    reviewer_name: str
+    review_count: int
+
+
+class ReviewLoadGini(BaseModel):
+    gini: float
+    total_reviews: int
+    total_reviewers: int
+    top_k_share: float
+    top_reviewers: list[ReviewLoadTopRow] = []
+
+
+class ReviewNetworkNode(BaseModel):
+    id: int
+    name: str
+    team: str | None = None
+
+
+class ReviewNetworkEdge(BaseModel):
+    reviewer_id: int
+    author_id: int
+    weight: int
+
+
+class ReviewNetworkResponse(BaseModel):
+    nodes: list[ReviewNetworkNode] = []
+    edges: list[ReviewNetworkEdge] = []
+
+
+class CrossTeamHandoff(BaseModel):
+    issue_id: int
+    identifier: str | None = None
+    title: str | None = None
+    from_team: str | None = None
+    to_team: str | None = None
+    changed_at: str | None = None
+
+
+class BlockedChainRow(BaseModel):
+    issue_id: int
+    identifier: str
+    title: str
+    status: str | None = None
+    blocker_depth: int
+
+
+class ReviewPingPongRow(BaseModel):
+    pr_id: int
+    number: int
+    title: str
+    review_round_count: int
+    author_id: int | None = None
+    state: str
+    html_url: str | None = None
+    repo: str | None = None
+
+
+class BusFactorFileRow(BaseModel):
+    filename: str
+    distinct_authors: int
+    owner_name: str | None = None
+
+
+class BimodalPeak(BaseModel):
+    bin: int
+    count: int
+
+
+class BimodalAnalysis(BaseModel):
+    is_bimodal: bool
+    peaks: list[BimodalPeak] = []
+    trough_ratio: float | None = None
+    bins: list[int] | None = None
+    bucket_size: float | None = None
+    min: float | None = None
+    max: float | None = None
+
+
+class CycleTimeHistogramResponse(BaseModel):
+    sample_size: int
+    p50_s: int
+    p90_s: int
+    bimodal_analysis: BimodalAnalysis
+
+
+class BottleneckDigestItem(BaseModel):
+    title: str
+    severity: str
+    detail: str
+    drill_path: str
+
+
+# --- Phase 05: Developer creator/worker/shepherd profiles ---
+
+
+class LabelCountRow(BaseModel):
+    label: str
+    count: int
+
+
+class LinearCreatorProfile(BaseModel):
+    issues_created: int
+    issues_created_by_type: dict[str, int]
+    top_labels: list[LabelCountRow] = []
+    avg_description_length: int
+    avg_comments_generated: float
+    avg_downstream_pr_review_rounds: float
+    sample_size_downstream_prs: int
+    self_assigned_pct: float
+    median_time_to_close_for_their_issues_s: int | None = None
+
+
+class LinearWorkerProfile(BaseModel):
+    issues_worked: int
+    self_picked_count: int
+    pushed_count: int
+    self_picked_pct: float
+    median_triage_to_start_s: int | None = None
+    median_cycle_time_s: int | None = None
+    issues_worked_by_status: dict[str, int]
+    reassigned_to_other_count: int
+
+
+class ShepherdCollaborator(BaseModel):
+    developer_id: int
+    name: str
+    count: int
+
+
+class LinearShepherdProfile(BaseModel):
+    comments_on_others_issues: int
+    issues_commented_on: int
+    unique_teams_commented_on: int
+    is_shepherd: bool
+    top_collaborators: list[ShepherdCollaborator] = []
+
+
+# --- Phase 10: DORA v2 ---
+
+
+class DoraV2Throughput(BaseModel):
+    deployment_frequency: float | None = None
+    lead_time_hours: float | None = None
+    mttr_hours: float | None = None
+
+
+class DoraV2Stability(BaseModel):
+    change_failure_rate: float | None = None
+    rework_rate: float | None = None
+
+
+class DoraV2Bands(BaseModel):
+    deployment_frequency: str
+    lead_time: str
+    mttr: str
+    change_failure_rate: str
+    rework_rate: str
+    overall: str
+
+
+class DoraV2CohortRow(BaseModel):
+    merges: int
+    rework_rate: float
+    share_pct: float
+
+
+class DoraV2Response(BaseModel):
+    throughput: DoraV2Throughput
+    stability: DoraV2Stability
+    bands: DoraV2Bands
+    cohorts: dict[str, DoraV2CohortRow]
+    date_from: str
+    date_to: str
 
 
 class LinearUserResponse(BaseModel):

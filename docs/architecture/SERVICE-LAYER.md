@@ -1,6 +1,6 @@
 ---
 purpose: "Service responsibilities, cross-service deps, async patterns, sync architecture, key algorithms"
-last-updated: "2026-04-01"
+last-updated: "2026-04-22"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -32,8 +32,21 @@ related:
 | `exceptions` | `services/exceptions.py` | ~25 | Custom service-layer exceptions (`AIFeatureDisabledError`, `AIBudgetExceededError`) |
 | `ai_schedules` | `services/ai_schedules.py` | ~260 | AI analysis scheduling CRUD, schedule execution, next-run computation |
 | `encryption` | `services/encryption.py` | ~35 | Shared Fernet encryption for Slack tokens and Linear API keys |
-| `linear_sync` | `services/linear_sync.py` | ~1200 | Linear GraphQL sync orchestration: projects → cycles → issues → PR linking → developer mapping |
+| `linear_sync` | `services/linear_sync.py` | ~2000 | Linear GraphQL sync orchestration: projects → project updates → cycles → issues (with per-issue comments/history/attachments/relations) → 4-pass PR linker → developer mapping. Rate limit handling covers both HTTP 429 and HTTP 400 `RATELIMITED`. Includes `sanitize_preview()`, `normalize_attachment_source()`, `run_linear_relink()` admin entry point |
 | `sprint_stats` | `services/sprint_stats.py` | ~560 | Sprint/planning stats: velocity, completion, scope creep, triage, alignment, estimation accuracy |
+| `linear_health` | `services/linear_health.py` | ~360 | Phase 03: 5-signal usage health (adoption, spec quality, autonomy, dialogue health, creator outcome) + `is_linear_primary()` guard |
+| `linkage_quality` | `services/linkage_quality.py` | ~170 | Phase 02: PR↔issue linkage summary — confidence/source breakdown + unlinked + disagreement PRs |
+| `issue_conversations` | `services/issue_conversations.py` | ~330 | Phase 04: chattiest issues with filters, comment↔bounce scatter, first-response histogram, participant distribution |
+| `flow_analytics` | `services/flow_analytics.py` | ~290 | Phase 06: status-time p50/p75/p90/p95, status regressions, triage bounces, refinement churn + readiness gate |
+| `bottleneck_intelligence` | `services/bottleneck_intelligence.py` | ~480 | Phase 07: CFD, WIP, review-load Gini, review network, cross-team handoffs, blocked chains, ping-pong, bus factor, bimodal cycle time, top-5 digest |
+| `developer_linear` | `services/developer_linear.py` | ~240 | Phase 05: per-developer creator / worker / shepherd profiles from Linear data |
+| `github_timeline` | `services/github_timeline.py` | ~480 | Phase 09: `timelineItems` GraphQL fetch (alias-batched), `persist_timeline_events`, `derive_pr_aggregates` (force-push count, ready_for_review, merge queue latency, etc.) |
+| `pr_cycle_stages` | `services/pr_cycle_stages.py` | ~180 | Phase 09: per-PR stage decomposition (open→ready→first_review→approved→merged), p50/p75/p90 by stage |
+| `codeowners` | `services/codeowners.py` | ~200 | Phase 09: CODEOWNERS parse (comments, wildcards, dir patterns, `**`) + `check_bypass()` detector |
+| `ai_cohort` | `services/ai_cohort.py` | ~140 | Phase 10: classify each PR as `human`/`ai_reviewed`/`ai_authored`/`hybrid` via reviewer usernames, labels, commit emails |
+| `dora_v2` | `services/dora_v2.py` | ~210 | Phase 10: wraps `get_dora_metrics` with throughput/stability split, rework rate (7-day same-file follow-up), DORA 2024 bands, per-cohort breakdown |
+| `incident_classification` | `services/incident_classification.py` | ~120 | Phase 10: hotfix/incident rule engine — default priority-ordered rules (revert, prefix, sev-1/sev-2 labels) |
+| `metric_spec` | `services/metric_spec.py` | ~180 | Phase 11: `MetricSpec` registry + `BANNED_METRICS` + `validate_registry()` (raises at import on missing paired outcomes) + `get_catalog()` |
 | `utils` | `services/utils.py` | ~15 | Shared utilities (`default_range` date defaulting) |
 
 ## Cross-Service Dependencies

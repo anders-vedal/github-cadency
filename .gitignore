@@ -28,3 +28,9 @@ e2e/playwright/.auth/
 e2e/playwright-report/
 e2e/test-results/
 e2e/node_modules/
+
+# Local SQLite test databases
+backend/*.db
+
+# Claude scheduler runtime
+.claude/scheduled_tasks.lock

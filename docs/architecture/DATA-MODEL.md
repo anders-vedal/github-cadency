@@ -1,6 +1,6 @@
 ---
 purpose: "ER diagram, all tables and relationships, FK decisions, JSONB structures, migration patterns"
-last-updated: "2026-04-01"
+last-updated: "2026-04-22"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -53,6 +53,19 @@ erDiagram
     work_categories ||--o{ work_category_rules : "has rules"
     work_categories ||--o{ pull_requests : "categorizes (no FK)"
     work_categories ||--o{ issues : "categorizes (no FK)"
+
+    integration_config ||--o{ external_projects : "owns"
+    integration_config ||--o{ external_sprints : "owns"
+    integration_config ||--o{ external_issues : "owns"
+    external_issues ||--o{ external_issue_comments : "has"
+    external_issues ||--o{ external_issue_history : "has"
+    external_issues ||--o{ external_issue_attachments : "has"
+    external_issues ||--o{ external_issue_relations : "issue side"
+    external_issues ||--o{ external_issue_relations : "related side"
+    external_projects ||--o{ external_project_updates : "narrates"
+    external_issues ||--o{ pr_external_issue_links : "linked from"
+    pull_requests ||--o{ pr_external_issue_links : "links to issue"
+    pull_requests ||--o{ pr_timeline_events : "event log"
 ```
 
 ## Tables
@@ -663,6 +676,127 @@ Admin-configurable classification rules evaluated by priority. 31 defaults seede
 
 `pull_requests.work_category` and `issues.work_category` reference `work_categories.category_key` but have no FK constraint — service-layer enforcement only.
 
+### Linear Insights v2 tables (migration 042)
+
+Per-issue depth for the Linear integration. Powers Phases 03-07 analytics.
+
+#### `external_issue_comments`
+
+Per-comment metadata + 280-char sanitized preview. Full body is NOT stored.
+
+| Column | Type | Nullable | Key | Notes |
+|--------|------|----------|-----|-------|
+| `id` | Integer | NO | PK | |
+| `issue_id` | Integer | NO | FK → external_issues (CASCADE) | |
+| `external_id` | String(255) | NO | UNIQUE | Linear comment id |
+| `parent_comment_id` | Integer | YES | FK → external_issue_comments (SET NULL) | Reply threads |
+| `author_developer_id` | Integer | YES | FK → developers (SET NULL) | |
+| `author_email` | String(320) | YES | | |
+| `external_user_id` | String(255) | YES | | Non-Linear integration users (Slack, etc.) |
+| `created_at` | DateTime(tz) | NO | | |
+| `updated_at` / `edited_at` | DateTime(tz) | YES | | |
+| `body_length` | Integer | NO | | Length of full body |
+| `body_preview` | String(280) | YES | | Sanitized via `sanitize_preview()` — emails/tokens/UUIDs/SHAs redacted |
+| `reaction_data` | JSONB | YES | | Per-emoji counts blob |
+| `is_system_generated` | Boolean | NO | | True iff Linear's `botActor` is present |
+| `bot_actor_type` | String(50) | YES | | `github`, `workflow`, etc. |
+
+Indexes: `(issue_id, created_at)`, `(author_developer_id, created_at)`, `(parent_comment_id)`.
+
+#### `external_issue_history`
+
+Structured `IssueHistory` events. One row per history node; columns cover every typed from/to
+transition Linear emits (state, assignee, estimate, priority, cycle, project, parent, labels).
+
+Key columns: `issue_id` (FK CASCADE), `external_id` (UNIQUE), `actor_developer_id`,
+`actor_email`, `bot_actor_type`, `changed_at`, plus from/to pairs: `from_state`/`to_state`,
+`from_state_category`/`to_state_category`, `from_assignee_id`/`to_assignee_id`,
+`from_estimate`/`to_estimate`, `from_priority`/`to_priority`, `from_cycle_id`/`to_cycle_id`,
+`from_project_id`/`to_project_id`, `from_parent_id`/`to_parent_id`, `added_label_ids`/
+`removed_label_ids` (JSONB), `archived`, `auto_archived`, `auto_closed`.
+
+Indexes: `(issue_id, changed_at)`, `(to_state_category, changed_at)`, `(actor_developer_id, changed_at)`.
+
+#### `external_issue_attachments`
+
+Linear attachments (GitHub PRs, commits, Slack links, Figma, etc.). Used by the 4-pass PR
+linker (Phase 02) for attachment-first high-confidence linking.
+
+Key columns: `issue_id` (FK CASCADE), `external_id` (UNIQUE), `url`, `source_type` (raw
+Linear value: `github`, `slack`, `figma`, etc.), `normalized_source_type` (our canonical:
+`github_pr` | `github_commit` | `github_issue` | `github` | `slack` | `figma` | `other`),
+`title` (sanitized), `metadata` (JSONB — Linear's opaque blob), `actor_developer_id`,
+`is_system_generated` (integration-attached when creator is null).
+
+Indexes: `(issue_id, normalized_source_type)`, `(url)`.
+
+#### `external_issue_relations`
+
+Linear `IssueRelation` — blocks/blocked_by/related/duplicate. **Stored bidirectionally**:
+when Linear says A `blocks` B, we insert both (A blocks B) and (B blocked_by A) so queries
+on either side don't need a UNION.
+
+Columns: `issue_id`, `related_issue_id` (both FK CASCADE), `external_id`, `relation_type`,
+`created_at`. Unique on `(external_id, relation_type, issue_id)`. Indexes:
+`(issue_id, relation_type)`, `(related_issue_id, relation_type)`.
+
+#### `external_project_updates`
+
+Linear `ProjectUpdate` — the authoritative project-health narrative (on_track / at_risk /
+off_track). Stores length + 280-char sanitized preview + diff length + health enum; full
+body is NOT persisted.
+
+Columns: `project_id` (FK CASCADE), `external_id` (UNIQUE), `author_developer_id`,
+`author_email`, `body_length`, `body_preview`, `diff_length`, `health`, `created_at`,
+`updated_at`, `edited_at`, `is_stale`, `reaction_data`.
+
+#### Columns added to `external_issues`
+
+- SLA (on Issue directly in Linear's schema): `sla_started_at`, `sla_breaches_at`,
+  `sla_high_risk_at`, `sla_medium_risk_at`, `sla_type`, `sla_status`
+- Triage: `triaged_at`, `triage_responsibility_team_id`, `triage_auto_assigned`
+- Stakeholder signal: `subscribers_count` (cheap bus-factor proxy)
+- Reactions: `reaction_data` (JSONB)
+
+#### Columns added to `pr_external_issue_links`
+
+- `link_confidence` (String(10), default `"low"`): `high` (linear_attachment) | `medium`
+  (branch / title) | `low` (body / commit_message). Upgraded when a stronger signal arrives.
+
+### GitHub PR timeline tables (migration 043)
+
+#### `pr_timeline_events`
+
+Raw timeline events fetched via GitHub GraphQL `timelineItems` union. Powers force-push
+detection, merge-queue latency, draft flip counts, CODEOWNERS bypass, review ping-pong alerts.
+
+Key columns: `pr_id` (FK CASCADE), `external_id` (UNIQUE — GitHub node_id),
+`event_type` (`review_requested`, `review_dismissed`, `head_ref_force_pushed`,
+`ready_for_review`, `converted_to_draft`, `renamed_title`, `added_to_merge_queue`,
+`removed_from_merge_queue`, `auto_merge_enabled`, etc.), `created_at`,
+`actor_developer_id`/`actor_github_username` (event doer),
+`subject_developer_id`/`subject_github_username` (event target — e.g. the reviewer
+requested), `before_sha`/`after_sha` (for force_push events), `data` (JSONB — raw event
+fields like label names, rename from/to, queue position).
+
+Indexes: `(pr_id, event_type, created_at)`, `(event_type, created_at)`,
+`(actor_developer_id, created_at)`.
+
+#### Columns added to `pull_requests`
+
+Derived aggregates computed by `github_timeline.derive_pr_aggregates()` from timeline events:
+
+- `force_push_count_after_first_review` (int default 0) — bounce signal
+- `review_requested_count` (int default 0)
+- `ready_for_review_at` (datetime nullable) — true start of review cycle for PRs born as drafts
+- `draft_flip_count` (int default 0)
+- `renamed_title_count` (int default 0) — scope-thrash signal
+- `dismissed_review_count` (int default 0)
+- `merge_queue_waited_s` (int nullable)
+- `auto_merge_waited_s` (int nullable)
+- `codeowners_bypass` (bool default false) — merged without required owner approval;
+  set by `codeowners.check_bypass()` (not yet wired into sync)
+
 ## Design Decisions
 
 ### Nullable Author/Reviewer/Assignee FKs
@@ -705,6 +839,8 @@ Stats are PR-level only to stay within GitHub API rate limits.
 `000_initial_schema` is the root migration (`down_revision = None`). It creates the 10 base tables (`developers`, `repositories`, `pull_requests`, `pr_reviews`, `pr_review_comments`, `issues`, `issue_comments`, `sync_events`, `ai_analyses`, `developer_goals`) with their original columns. All subsequent migrations are additive from this base. `alembic upgrade head` is self-contained on a blank database.
 
 Recent migrations (023-033): `benchmark_group_config` table + 4 seeded groups (023), `work_category_source` columns on PRs and issues (024), `sync_schedule_config` singleton (025), `triggered_by` and `sync_scope` on sync_events (026), `role_definitions` table + 13 seeded roles + `issues.creator_id` FK (027), missing indexes on `issue_comments.issue_id` and `pr_review_comments.pr_id` (028), `teams` table + 2 new seeded roles (`senior_devops`, `other`) (029), `work_categories` + `work_category_rules` tables with seed data + widen `work_category` columns to String(50) (030), Slack integration tables (031), structured logging tables (032), notification center tables (`notifications`, `notification_reads`, `notification_dismissals`, `notification_type_dismissals`, `notification_config`) with 6 indexes + singleton seed (033).
+
+Linear Insights v2 migrations (034-043): work category source fields + scope_unit + creator fields (034-038), planning notification alerts (039), `linear_sync_enabled` / `linear_sync_interval_minutes` on `sync_schedule_config` (040), `pr_check_runs.html_url` (041), **Phase 01 sync depth (042):** 5 new tables (`external_issue_comments`, `external_issue_history`, `external_issue_attachments`, `external_issue_relations`, `external_project_updates`) + SLA/triage/subscribers/reactions columns on `external_issues` + `link_confidence` on `pr_external_issue_links`. **Phase 09 GitHub timeline (043):** `pr_timeline_events` table + 9 derived-aggregate columns on `pull_requests`.
 
 Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive DDL.
 

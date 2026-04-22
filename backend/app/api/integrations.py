@@ -19,7 +19,10 @@ from app.schemas.schemas import (
     IntegrationTestResponse,
     IssueSourceResponse,
     LinearUserListResponse,
+    LinkageRateTrendResponse,
+    LinkQualitySummary,
     MapUserRequest,
+    RelinkResponse,
 )
 from app.services.linear_sync import (
     create_integration,
@@ -29,11 +32,13 @@ from app.services.linear_sync import (
     get_primary_issue_source,
     list_linear_users,
     map_user,
+    run_linear_relink,
     run_linear_sync,
     set_primary_issue_source,
     test_linear_connection,
     update_integration,
 )
+from app.services.linkage_quality import get_link_quality_summary, get_linkage_rate_trend
 
 router = APIRouter()
 
@@ -329,3 +334,66 @@ async def set_primary(
         raise HTTPException(status_code=400, detail="Integration must be active to set as primary")
     config = await set_primary_issue_source(db, integration_id)
     return IntegrationConfigResponse(**_build_response(config))
+
+
+@router.get(
+    "/integrations/{integration_id}/linkage-quality",
+    response_model=LinkQualitySummary,
+    dependencies=[Depends(require_admin)],
+)
+async def linkage_quality(
+    integration_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only linkage health summary (Phase 02)."""
+    config = await get_integration(db, integration_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    if config.type != "linear":
+        raise HTTPException(status_code=400, detail="Not a Linear integration")
+    summary = await get_link_quality_summary(db, integration_id=integration_id)
+    return LinkQualitySummary(**summary)
+
+
+@router.post(
+    "/integrations/{integration_id}/relink",
+    response_model=RelinkResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def trigger_relink(
+    integration_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Rerun the 4-pass PR↔issue linker (Phase 02). Admin only. Idempotent."""
+    config = await get_integration(db, integration_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    if config.type != "linear":
+        raise HTTPException(status_code=400, detail="Not a Linear integration")
+    sync_event = await run_linear_relink(db, integration_id)
+    return RelinkResponse(
+        sync_event_id=sync_event.id,
+        status=sync_event.status,
+    )
+
+
+@router.get(
+    "/integrations/{integration_id}/linkage-quality/trend",
+    response_model=LinkageRateTrendResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def linkage_quality_trend(
+    integration_id: int,
+    weeks: int = Query(12, ge=2, le=52),
+    db: AsyncSession = Depends(get_db),
+):
+    """Weekly linkage-rate trend for the last ``weeks`` weeks (Phase 02 deviation)."""
+    config = await get_integration(db, integration_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    if config.type != "linear":
+        raise HTTPException(status_code=400, detail="Not a Linear integration")
+    buckets = await get_linkage_rate_trend(
+        db, integration_id=integration_id, weeks=weeks
+    )
+    return LinkageRateTrendResponse(buckets=buckets)

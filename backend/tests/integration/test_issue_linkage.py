@@ -114,6 +114,63 @@ class TestIssueLinkageByDeveloper:
         assert sample_developer_b.id not in attention_ids
 
     @pytest.mark.asyncio
+    async def test_linkage_excludes_system_and_non_contributor_roles(
+        self, client, sample_developer, sample_repo, db_session
+    ):
+        """Developers with `system` or `non_contributor` roles (bots, designers)
+        must not appear in per-developer issue linkage stats — PR workflow metrics
+        shouldn't judge accounts that don't author human-curated PRs."""
+        bot = Developer(
+            github_username="dependabot[bot]",
+            display_name="dependabot[bot]",
+            role="system_account",
+            app_role="developer",
+            is_active=True,
+            created_at=NOW,
+        )
+        designer = Developer(
+            github_username="designer1",
+            display_name="Designer One",
+            role="designer",
+            app_role="developer",
+            is_active=True,
+            created_at=NOW,
+        )
+        db_session.add_all([bot, designer])
+        await db_session.flush()
+        db_session.add_all([
+            PullRequest(
+                github_id=901, repo_id=sample_repo.id, author_id=bot.id, number=40,
+                title="Bump lib", body="", state="closed", is_merged=True,
+                created_at=ONE_WEEK_AGO, merged_at=NOW, closes_issue_numbers=[],
+            ),
+            PullRequest(
+                github_id=902, repo_id=sample_repo.id, author_id=designer.id, number=41,
+                title="Tweak CSS", body="", state="closed", is_merged=True,
+                created_at=ONE_WEEK_AGO, merged_at=NOW, closes_issue_numbers=[],
+            ),
+            PullRequest(
+                github_id=903, repo_id=sample_repo.id, author_id=sample_developer.id, number=42,
+                title="Real work", body="", state="closed", is_merged=True,
+                created_at=ONE_WEEK_AGO, merged_at=NOW, closes_issue_numbers=[],
+            ),
+        ])
+        await db_session.commit()
+
+        resp = await client.get("/api/stats/issue-linkage/developers")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        dev_ids = {d["developer_id"] for d in data["developers"]}
+        assert bot.id not in dev_ids
+        assert designer.id not in dev_ids
+        assert sample_developer.id in dev_ids
+
+        attention_ids = {d["developer_id"] for d in data["attention_developers"]}
+        assert bot.id not in attention_ids
+        assert designer.id not in attention_ids
+
+    @pytest.mark.asyncio
     async def test_linkage_team_filter(
         self, client, sample_developer, sample_developer_b, sample_repo, db_session
     ):

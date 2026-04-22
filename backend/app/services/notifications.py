@@ -153,7 +153,34 @@ ALERT_TYPE_META: dict[str, dict] = {
         "description": "Most recent Linear data sync failed",
         "thresholds": [],
     },
+    "pr_review_ping_pong": {
+        "label": "PR Review Ping-Pong",
+        "description": "Open PR with excessive review rounds (back-and-forth)",
+        "thresholds": [],
+    },
+    "pr_force_push_after_review": {
+        "label": "Force Pushes After Review",
+        "description": "Open PR rewritten with force pushes after a review was submitted",
+        "thresholds": [],
+    },
+    "codeowners_bypassed": {
+        "label": "CODEOWNERS Bypassed",
+        "description": "PR merged without an approving review from a matching CODEOWNERS entry",
+        "thresholds": [],
+    },
+    "merge_queue_stuck": {
+        "label": "Merge Queue Stuck",
+        "description": "PR has been sitting in the merge queue longer than expected",
+        "thresholds": [],
+    },
 }
+
+# Threshold constants for Phase 09 alerts — intentional plain constants rather
+# than NotificationConfig columns to keep the migration surface small. Future
+# work can promote these to config fields if operators want them tunable.
+PR_REVIEW_PING_PONG_ROUNDS = 3
+PR_FORCE_PUSH_AFTER_REVIEW_THRESHOLD = 2
+MERGE_QUEUE_STUCK_MINUTES = 30
 
 
 # ── Config CRUD (singleton pattern) ──────────────────────────────────────
@@ -1251,6 +1278,217 @@ async def _evaluate_planning_alerts(
     return active_keys
 
 
+# ── PR timeline alerts (Phase 09) ────────────────────────────────────────
+
+
+async def _evaluate_pr_timeline_alerts(
+    db: AsyncSession, config: NotificationConfig
+) -> set[str]:
+    """Evaluate the four PR-timeline-enrichment alert types.
+
+    All four are cheap column-level checks on ``pull_requests`` plus the
+    latest ``pr_timeline_events`` row for merge-queue dwell time. We do this
+    after GitHub sync completes so the aggregate columns (Phase 09 derive
+    step) are fresh.
+
+    Skipped silently if ``pr_timeline_events`` does not yet exist in the DB
+    (e.g. a test fixture or pre-migration environment).
+    """
+    from app.models.models import PRTimelineEvent, PullRequest, Repository
+
+    active_keys: set[str] = set()
+    now = datetime.now(timezone.utc)
+
+    ping_pong_enabled = getattr(config, "alert_pr_review_ping_pong_enabled", True)
+    force_push_enabled = getattr(
+        config, "alert_pr_force_push_after_review_enabled", True
+    )
+    codeowners_enabled = getattr(config, "alert_codeowners_bypassed_enabled", True)
+    merge_queue_enabled = getattr(config, "alert_merge_queue_stuck_enabled", True)
+
+    # ── pr_review_ping_pong: open PR with >N review rounds ──
+    if ping_pong_enabled:
+        pp_keys: set[str] = set()
+        stmt = (
+            select(PullRequest, Repository.full_name)
+            .join(Repository, PullRequest.repo_id == Repository.id)
+            .where(
+                PullRequest.state == "open",
+                PullRequest.review_round_count > PR_REVIEW_PING_PONG_ROUNDS,
+            )
+        )
+        try:
+            result = await db.execute(stmt)
+        except Exception:
+            # Table / column missing — let the outer try/except in
+            # evaluate_all_alerts report it as a soft error.
+            raise
+        for pr, repo_full_name in result.all():
+            key = f"pr_review_ping_pong:pr:{pr.id}"
+            pp_keys.add(key)
+            active_keys.add(key)
+            await _upsert_notification(
+                db,
+                alert_key=key,
+                alert_type="pr_review_ping_pong",
+                severity="warning",
+                title=f"PR #{pr.number} has {pr.review_round_count} review rounds",
+                body=pr.title,
+                entity_type="pull_request",
+                entity_id=pr.id,
+                link_path=pr.html_url,
+                developer_id=pr.author_id,
+                metadata={
+                    "review_round_count": pr.review_round_count,
+                    "repo": repo_full_name,
+                },
+            )
+        await _auto_resolve_stale(db, "pr_review_ping_pong", pp_keys)
+
+    # ── pr_force_push_after_review: open PR with >=N force pushes after review ──
+    if force_push_enabled:
+        fp_keys: set[str] = set()
+        stmt = (
+            select(PullRequest, Repository.full_name)
+            .join(Repository, PullRequest.repo_id == Repository.id)
+            .where(
+                PullRequest.state == "open",
+                PullRequest.force_push_count_after_first_review
+                >= PR_FORCE_PUSH_AFTER_REVIEW_THRESHOLD,
+            )
+        )
+        result = await db.execute(stmt)
+        for pr, repo_full_name in result.all():
+            key = f"pr_force_push_after_review:pr:{pr.id}"
+            fp_keys.add(key)
+            active_keys.add(key)
+            severity = (
+                "critical"
+                if pr.force_push_count_after_first_review >= 4
+                else "warning"
+            )
+            await _upsert_notification(
+                db,
+                alert_key=key,
+                alert_type="pr_force_push_after_review",
+                severity=severity,
+                title=(
+                    f"PR #{pr.number}: "
+                    f"{pr.force_push_count_after_first_review} force pushes after review"
+                ),
+                body=pr.title,
+                entity_type="pull_request",
+                entity_id=pr.id,
+                link_path=pr.html_url,
+                developer_id=pr.author_id,
+                metadata={
+                    "force_push_count": pr.force_push_count_after_first_review,
+                    "repo": repo_full_name,
+                },
+            )
+        await _auto_resolve_stale(db, "pr_force_push_after_review", fp_keys)
+
+    # ── codeowners_bypassed: merged PR with codeowners_bypass=true ──
+    if codeowners_enabled:
+        co_keys: set[str] = set()
+        stmt = (
+            select(PullRequest, Repository.full_name)
+            .join(Repository, PullRequest.repo_id == Repository.id)
+            .where(
+                PullRequest.is_merged.is_(True),
+                PullRequest.codeowners_bypass.is_(True),
+            )
+        )
+        result = await db.execute(stmt)
+        for pr, repo_full_name in result.all():
+            key = f"codeowners_bypassed:pr:{pr.id}"
+            co_keys.add(key)
+            active_keys.add(key)
+            await _upsert_notification(
+                db,
+                alert_key=key,
+                alert_type="codeowners_bypassed",
+                severity="warning",
+                title=f"PR #{pr.number} merged without CODEOWNERS approval",
+                body=pr.title,
+                entity_type="pull_request",
+                entity_id=pr.id,
+                link_path=pr.html_url,
+                developer_id=pr.author_id,
+                metadata={"repo": repo_full_name},
+            )
+        await _auto_resolve_stale(db, "codeowners_bypassed", co_keys)
+
+    # ── merge_queue_stuck: PR in merge queue > N minutes ──
+    if merge_queue_enabled:
+        mq_keys: set[str] = set()
+        cutoff = now - timedelta(minutes=MERGE_QUEUE_STUCK_MINUTES)
+        # Latest added_to_merge_queue per PR that has NOT been followed by a
+        # removed_from_merge_queue. We use a correlated subquery because the
+        # alternative (window functions) isn't supported uniformly in SQLite.
+        added_stmt = (
+            select(
+                PRTimelineEvent.pr_id,
+                func.max(PRTimelineEvent.created_at).label("added_at"),
+            )
+            .where(PRTimelineEvent.event_type == "added_to_merge_queue")
+            .group_by(PRTimelineEvent.pr_id)
+            .subquery()
+        )
+        removed_stmt = (
+            select(
+                PRTimelineEvent.pr_id,
+                func.max(PRTimelineEvent.created_at).label("removed_at"),
+            )
+            .where(PRTimelineEvent.event_type == "removed_from_merge_queue")
+            .group_by(PRTimelineEvent.pr_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                PullRequest,
+                Repository.full_name,
+                added_stmt.c.added_at,
+                removed_stmt.c.removed_at,
+            )
+            .join(Repository, PullRequest.repo_id == Repository.id)
+            .join(added_stmt, PullRequest.id == added_stmt.c.pr_id)
+            .outerjoin(removed_stmt, PullRequest.id == removed_stmt.c.pr_id)
+            .where(
+                PullRequest.state == "open",
+                added_stmt.c.added_at <= cutoff,
+            )
+        )
+        result = await db.execute(stmt)
+        for pr, repo_full_name, added_at, removed_at in result.all():
+            added_ts = _ensure_tz(added_at)
+            removed_ts = _ensure_tz(removed_at)
+            if removed_ts and added_ts and removed_ts >= added_ts:
+                # PR was removed again — not stuck anymore
+                continue
+            waited_min = int((now - added_ts).total_seconds() / 60) if added_ts else 0
+            key = f"merge_queue_stuck:pr:{pr.id}"
+            mq_keys.add(key)
+            active_keys.add(key)
+            severity = "critical" if waited_min >= 120 else "warning"
+            await _upsert_notification(
+                db,
+                alert_key=key,
+                alert_type="merge_queue_stuck",
+                severity=severity,
+                title=f"PR #{pr.number} stuck in merge queue {waited_min}m",
+                body=pr.title,
+                entity_type="pull_request",
+                entity_id=pr.id,
+                link_path=pr.html_url,
+                developer_id=pr.author_id,
+                metadata={"waited_minutes": waited_min, "repo": repo_full_name},
+            )
+        await _auto_resolve_stale(db, "merge_queue_stuck", mq_keys)
+
+    return active_keys
+
+
 # ── Main evaluation orchestrator ─────────────────────────────────────────
 
 
@@ -1275,13 +1513,19 @@ async def evaluate_all_alerts(db: AsyncSession) -> dict[str, int]:
         ("sync_failure", _evaluate_sync_failure_alert, config.alert_sync_failure_enabled),
         ("planning", _evaluate_planning_alerts, True),  # has sub-toggles, short-circuits if no Linear
         ("config", _evaluate_config_alerts, True),  # has sub-toggles
+        ("pr_timeline", _evaluate_pr_timeline_alerts, True),  # has sub-toggles
     ]
 
     for name, evaluator, enabled in evaluators:
         if not enabled:
             continue
         try:
-            if evaluator in (_evaluate_ai_budget_alert, _evaluate_sync_failure_alert, _evaluate_planning_alerts):
+            if evaluator in (
+                _evaluate_ai_budget_alert,
+                _evaluate_sync_failure_alert,
+                _evaluate_planning_alerts,
+                _evaluate_pr_timeline_alerts,
+            ):
                 await evaluator(db, config)
             elif evaluator == _evaluate_config_alerts:
                 await evaluator(db, config)

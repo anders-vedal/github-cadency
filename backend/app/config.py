@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Auth
     jwt_secret: str = ""
     devpulse_initial_admin: str = ""
+    devpulse_allowed_users: str = ""  # comma-separated GitHub usernames; case-insensitive
     frontend_url: str = "http://localhost:3001"
 
     # AI (optional — only needed for AI analysis)
@@ -81,6 +82,13 @@ class Settings(BaseSettings):
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
+    @property
+    def allowed_users_list(self) -> list[str]:
+        """Parse DEVPULSE_ALLOWED_USERS into a lowercased list (empty if unset)."""
+        if not self.devpulse_allowed_users:
+            return []
+        return [u.strip().lower() for u in self.devpulse_allowed_users.split(",") if u.strip()]
+
 
 settings = Settings()
 
@@ -100,15 +108,15 @@ def validate_github_config() -> list[dict]:
 
     checks: list[dict] = []
 
-    # github_org
-    if not settings.github_org:
+    # github_org — optional since the sync now uses /installation/repositories
+    if settings.github_org:
+        checks.append({"field": "GITHUB_ORG", "status": "ok", "message": f"Set to '{settings.github_org}' (display label)"})
+    else:
         checks.append({
             "field": "GITHUB_ORG",
-            "status": "error",
-            "message": "GITHUB_ORG is not set. This is required to discover repos and sync data.",
+            "status": "ok",
+            "message": "Unset. Repo discovery uses /installation/repositories — works for both User and Org installations.",
         })
-    else:
-        checks.append({"field": "GITHUB_ORG", "status": "ok", "message": f"Set to '{settings.github_org}'"})
 
     # github_app_id
     if settings.github_app_id == 0:

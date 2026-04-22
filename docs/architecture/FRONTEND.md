@@ -1,6 +1,6 @@
 ---
 purpose: "Routing, component hierarchy, state management, hooks, design system, error/loading patterns"
-last-updated: "2026-04-01"
+last-updated: "2026-04-22"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -33,6 +33,10 @@ All routes defined in `frontend/src/App.tsx`.
 | `/insights/investment` | `Investment` | Admin | SidebarLayout | Clickable donut charts, inline category preview, custom tooltips |
 | `/insights/investment/:category` | `InvestmentCategory` | Admin | SidebarLayout | Paginated item table with recategorization dropdowns |
 | `/insights/org-chart` | `OrgChart` | Admin | SidebarLayout |
+| `/insights/conversations` | `IssueConversations` | Any | SidebarLayout | Phase 04 — chattiest issues + comment↔bounce scatter + first-response histogram. Linear-primary gate. |
+| `/insights/flow` | `FlowAnalytics` | Any | SidebarLayout | Phase 06 — status-time distribution, regressions, triage bounces, churn. Readiness-gated (14d + 100 issues). |
+| `/insights/bottlenecks` | `Bottlenecks` | Any | SidebarLayout | Phase 07 — CFD, WIP, review Gini, silos, blocked chains, ping-pong, bus factor, bimodal detection. |
+| `/admin/linkage-quality` | `LinkageQuality` | Admin | SidebarLayout | Phase 02 — confidence donut + source breakdown + unlinked PRs + disagreement list + rerun linker button. |
 | `/admin/repos` | `Repos` | Admin | SidebarLayout | Summary strip, search/filter/sort, table/card toggle, health indicators, deep links to insights |
 | `/admin/sync` | `SyncPage` | Admin | SidebarLayout |
 | `/admin/sync/:id` | `SyncDetailPage` | Admin | SidebarLayout |
@@ -282,6 +286,28 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useCategoryConfig()` | Derived from `useWorkCategories()` | Replaces static `CATEGORY_CONFIG`. Returns `{ config, order }` with `FALLBACK_CATEGORY_CONFIG` while loading. |
 
 `WorkCategoriesPage` (`/admin/work-categories`): Four-panel admin page — categories table (color swatch, CRUD, `exclude_from_stats` toggle), classification rules table (priority/match-type badge/CRUD), GitHub suggestions card (scan synced data for uncovered labels/issue types, review-and-approve flow with per-row editable category dropdown, approve/dismiss per row, bulk "Approve All"), and batch reclassify card. `SuggestionsCard` component manages local state for scanned results — dismissed items are not persisted (reappear on next scan). Approved suggestions create rules with priority 45 (labels) or 55 (issue types). Pattern matches `AISettingsPage`.
+
+### Linear Insights v2 Hooks
+
+Added by Phases 02-07. All respect `DateRangeContext` and include date params in query keys.
+
+| File | Hooks | Endpoints | Notes |
+|------|-------|-----------|-------|
+| `useLinkageQuality.ts` | `useLinkageQuality(id)`, `useRelink()` | `GET /integrations/:id/linkage-quality`, `POST /integrations/:id/relink` | Phase 02. Admin-only. |
+| `useLinearUsageHealth.ts` | `useLinearUsageHealth(from, to)` | `GET /linear/usage-health` | Phase 03. 5-min staleTime. Treats 409 as "hide card, not error" — returns null rather than throwing. |
+| `useConversations.ts` | `useChattiestIssues(filters)`, `useCommentBounceScatter(from, to)`, `useFirstResponseHistogram(from, to)`, `useParticipantDistribution(from, to)` | `GET /conversations/*` | Phase 04. |
+| `useDeveloperLinear.ts` | `useDeveloperLinearCreator(id, from, to)`, `useDeveloperLinearWorker(id, from, to)`, `useDeveloperLinearShepherd(id, from, to)` | `GET /developers/:id/linear-{creator,worker,shepherd}-profile` | Phase 05. `enabled: hasLinear && isPrimary`. API returns 403 for cross-user access. |
+| `useFlowAnalytics.ts` | `useFlowReadiness()`, `useStatusTimeDistribution()`, `useStatusRegressions()`, `useTriageBounces()`, `useRefinementChurn()` | `GET /flow/*` | Phase 06. |
+| `useBottlenecks.ts` | `useBottleneckSummary()`, `useCumulativeFlow()`, `useWip()`, `useReviewLoad()`, `useReviewNetwork()`, `useCrossTeamHandoffs()`, `useBlockedChains()`, `useReviewPingPong()`, `useBusFactorFiles()`, `useCycleHistogram()` | `GET /bottlenecks/*` | Phase 07. 10 hooks. |
+
+Linear Insights v2 components:
+
+- **`components/linear-health/LinearUsageHealthCard.tsx`** — Dashboard card rendering 5 signal rows with status pills (healthy green / warning amber / critical red) and click-through to drill pages. Gated on `hasLinear && issueSource?.source === 'linear'` in `Dashboard.tsx`.
+- **`components/linear-health/CreatorOutcomeMiniTable.tsx`** — Top-3 creators with low-sample-size (`<5 PRs`) badges.
+- **`components/developer/Linear{Creator,Worker,Shepherd}Section.tsx`** — Stacked `<h2>` sections on `DeveloperDetail.tsx`. Creator + Shepherd gated on `isAdmin || isOwnPage`; Worker visible to anyone when Linear primary.
+- **`components/charts/CommentBounceScatter.tsx`** — Recharts ComposedChart with hand-rolled OLS regression line + R² overlay.
+- **`components/charts/LorenzCurve.tsx`** — Gini visualization: cumulative-share AreaChart vs perfect-equality reference line.
+- **`components/charts/CumulativeFlowDiagram.tsx`** — Stacked AreaChart across 7 status bands for CFD.
 
 ## API Integration (`utils/api.ts`)
 

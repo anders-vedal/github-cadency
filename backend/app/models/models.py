@@ -153,12 +153,36 @@ class PullRequest(Base):
     work_category_source: Mapped[str | None] = mapped_column(String(50))
     author_github_username: Mapped[str | None] = mapped_column(String(255))
 
+    # Phase 09 — GitHub PR timeline enrichment aggregates
+    force_push_count_after_first_review: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    review_requested_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    ready_for_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    draft_flip_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    renamed_title_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    dismissed_review_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    merge_queue_waited_s: Mapped[int | None] = mapped_column(Integer)
+    auto_merge_waited_s: Mapped[int | None] = mapped_column(Integer)
+    codeowners_bypass: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+
     repo: Mapped["Repository"] = relationship(back_populates="pull_requests")
     author: Mapped["Developer | None"] = relationship(back_populates="pull_requests")
     reviews: Mapped[list["PRReview"]] = relationship(back_populates="pr")
     review_comments: Mapped[list["PRReviewComment"]] = relationship(back_populates="pr")
     files: Mapped[list["PRFile"]] = relationship(back_populates="pr")
     check_runs: Mapped[list["PRCheckRun"]] = relationship(back_populates="pr")
+    timeline_events: Mapped[list["PRTimelineEvent"]] = relationship(back_populates="pr")
 
 
 class PRReview(Base):
@@ -251,6 +275,7 @@ class PRCheckRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_s: Mapped[int | None] = mapped_column(Integer)
     run_attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    html_url: Mapped[str | None] = mapped_column(Text)
 
     pr: Mapped["PullRequest"] = relationship(back_populates="check_runs")
 
@@ -1121,6 +1146,25 @@ class ExternalIssue(Base):
     cycle_time_s: Mapped[int | None] = mapped_column(Integer)
     url: Mapped[str | None] = mapped_column(Text)
 
+    # SLA (Linear exposes these directly on Issue)
+    sla_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_breaches_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_high_risk_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_medium_risk_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_type: Mapped[str | None] = mapped_column(String(30))
+    sla_status: Mapped[str | None] = mapped_column(String(30))
+
+    # Triage
+    triaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    triage_responsibility_team_id: Mapped[str | None] = mapped_column(String(255))
+    triage_auto_assigned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Stakeholder signal
+    subscribers_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    # Reactions blob
+    reaction_data: Mapped[list | None] = mapped_column(JSONB)
+
     integration: Mapped["IntegrationConfig"] = relationship(back_populates="external_issues")
     assignee: Mapped["Developer | None"] = relationship(foreign_keys=[assignee_developer_id])
     creator: Mapped["Developer | None"] = relationship(foreign_keys=[creator_developer_id])
@@ -1165,12 +1209,281 @@ class PRExternalIssueLink(Base):
     pull_request_id: Mapped[int] = mapped_column(ForeignKey("pull_requests.id", ondelete="CASCADE"), nullable=False)
     external_issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
     link_source: Mapped[str] = mapped_column(String(30), nullable=False)
+    link_confidence: Mapped[str] = mapped_column(String(10), nullable=False, default="low", server_default="low")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
 
     pull_request: Mapped["PullRequest"] = relationship(foreign_keys=[pull_request_id])
     external_issue: Mapped["ExternalIssue"] = relationship(back_populates="pr_links")
+
+
+class ClassifierRule(Base):
+    """Admin-editable rules for incident/hotfix + AI-cohort classification (Phase 10 C3).
+
+    A single table with a ``kind`` discriminator powers three rule families:
+
+    - ``incident``: augments ``services/incident_classification.default_rules()``
+      (title/label/revert detection driving Change Failure Rate).
+    - ``ai_reviewer``: pattern strings matched against
+      ``PRReview.reviewer_github_username`` to classify AI-reviewed PRs.
+    - ``ai_author``: label patterns matched against ``PullRequest.labels`` to
+      classify AI-authored PRs.
+
+    All rows are additive on top of the hard-coded defaults (Python constants
+    in each service). This lets DevPulse ship with a sensible baseline while
+    letting admins override per-workspace.
+    """
+
+    __tablename__ = "classifier_rules"
+    __table_args__ = (
+        Index("ix_classifier_rules_kind", "kind", "enabled"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # 'incident' | 'ai_reviewer' | 'ai_author'
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    # For incident: 'pr_title_prefix' | 'revert_detection' | 'github_label' |
+    # 'linear_label' | 'linear_issue_type'.
+    # For ai_reviewer / ai_author: 'username' / 'label' (kept as a string for
+    # forward compatibility even though today the meaning is implied by kind).
+    rule_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    pattern: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    is_hotfix: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    is_incident: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="100"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class PRTimelineEvent(Base):
+    """GitHub PR timeline items captured via GraphQL `timelineItems`.
+
+    One row per event (force push, ready-for-review, review request, label,
+    merge-queue transition, auto-merge toggle, cross-reference, etc). Used to
+    derive bounce counts, review-queue latencies, CODEOWNERS bypass, and
+    precise cycle-time stage decomposition.
+    """
+
+    __tablename__ = "pr_timeline_events"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_pr_timeline_event_ext_id"),
+        Index(
+            "ix_pr_timeline_events_pr_type_created",
+            "pr_id",
+            "event_type",
+            "created_at",
+        ),
+        Index(
+            "ix_pr_timeline_events_type_created", "event_type", "created_at"
+        ),
+        Index(
+            "ix_pr_timeline_events_actor_created",
+            "actor_developer_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pr_id: Mapped[int] = mapped_column(
+        ForeignKey("pull_requests.id", ondelete="CASCADE"), nullable=False
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    actor_developer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("developers.id", ondelete="SET NULL")
+    )
+    actor_github_username: Mapped[str | None] = mapped_column(String(255))
+    subject_developer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("developers.id", ondelete="SET NULL")
+    )
+    subject_github_username: Mapped[str | None] = mapped_column(String(255))
+    before_sha: Mapped[str | None] = mapped_column(String(40))
+    after_sha: Mapped[str | None] = mapped_column(String(40))
+    data: Mapped[dict | None] = mapped_column(JSONB)
+
+    pr: Mapped["PullRequest"] = relationship(
+        back_populates="timeline_events", foreign_keys=[pr_id]
+    )
+    actor: Mapped["Developer | None"] = relationship(
+        foreign_keys=[actor_developer_id], viewonly=True
+    )
+    subject: Mapped["Developer | None"] = relationship(
+        foreign_keys=[subject_developer_id], viewonly=True
+    )
+
+
+class ExternalIssueComment(Base):
+    """Comments on Linear issues. Stores metadata + 280-char preview, not full body."""
+    __tablename__ = "external_issue_comments"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_ext_issue_comment_ext_id"),
+        Index("ix_ext_issue_comments_issue_created", "issue_id", "created_at"),
+        Index("ix_ext_issue_comments_author", "author_developer_id", "created_at"),
+        Index("ix_ext_issue_comments_parent", "parent_comment_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_comment_id: Mapped[int | None] = mapped_column(ForeignKey("external_issue_comments.id", ondelete="SET NULL"))
+    author_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    author_email: Mapped[str | None] = mapped_column(String(320))
+    external_user_id: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    body_length: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    body_preview: Mapped[str | None] = mapped_column(String(280))
+    reaction_data: Mapped[list | None] = mapped_column(JSONB)
+    is_system_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    bot_actor_type: Mapped[str | None] = mapped_column(String(50))
+
+    issue: Mapped["ExternalIssue"] = relationship(foreign_keys=[issue_id])
+    author: Mapped["Developer | None"] = relationship(foreign_keys=[author_developer_id])
+
+
+class ExternalIssueHistoryEvent(Base):
+    """Linear IssueHistory events — structured transitions with all changed columns."""
+    __tablename__ = "external_issue_history"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_ext_issue_history_ext_id"),
+        Index("ix_ext_issue_history_issue_changed", "issue_id", "changed_at"),
+        Index("ix_ext_issue_history_category", "to_state_category", "changed_at"),
+        Index("ix_ext_issue_history_actor", "actor_developer_id", "changed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    actor_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    actor_email: Mapped[str | None] = mapped_column(String(320))
+    bot_actor_type: Mapped[str | None] = mapped_column(String(50))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # State transition (store both raw state name and mapped category)
+    from_state: Mapped[str | None] = mapped_column(String(100))
+    to_state: Mapped[str | None] = mapped_column(String(100))
+    from_state_category: Mapped[str | None] = mapped_column(String(30))
+    to_state_category: Mapped[str | None] = mapped_column(String(30))
+    # Assignee transition
+    from_assignee_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    to_assignee_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    # Estimate
+    from_estimate: Mapped[float | None] = mapped_column(Float)
+    to_estimate: Mapped[float | None] = mapped_column(Float)
+    # Priority
+    from_priority: Mapped[int | None] = mapped_column(Integer)
+    to_priority: Mapped[int | None] = mapped_column(Integer)
+    # Cycle
+    from_cycle_id: Mapped[int | None] = mapped_column(ForeignKey("external_sprints.id", ondelete="SET NULL"))
+    to_cycle_id: Mapped[int | None] = mapped_column(ForeignKey("external_sprints.id", ondelete="SET NULL"))
+    # Project
+    from_project_id: Mapped[int | None] = mapped_column(ForeignKey("external_projects.id", ondelete="SET NULL"))
+    to_project_id: Mapped[int | None] = mapped_column(ForeignKey("external_projects.id", ondelete="SET NULL"))
+    # Parent
+    from_parent_id: Mapped[int | None] = mapped_column(ForeignKey("external_issues.id", ondelete="SET NULL"))
+    to_parent_id: Mapped[int | None] = mapped_column(ForeignKey("external_issues.id", ondelete="SET NULL"))
+    # Labels
+    added_label_ids: Mapped[list | None] = mapped_column(JSONB)
+    removed_label_ids: Mapped[list | None] = mapped_column(JSONB)
+    # Archive flags
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    auto_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    auto_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    issue: Mapped["ExternalIssue"] = relationship(foreign_keys=[issue_id])
+    actor: Mapped["Developer | None"] = relationship(foreign_keys=[actor_developer_id])
+
+
+class ExternalIssueAttachment(Base):
+    """Attachments on Linear issues — e.g. GitHub PR links, Slack, Figma."""
+    __tablename__ = "external_issue_attachments"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_ext_issue_attachment_ext_id"),
+        Index("ix_ext_issue_attachments_issue_type", "issue_id", "normalized_source_type"),
+        Index("ix_ext_issue_attachments_url", "url"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str | None] = mapped_column(String(50))
+    normalized_source_type: Mapped[str | None] = mapped_column(String(30))
+    title: Mapped[str | None] = mapped_column(String(500))
+    attachment_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    actor_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    is_system_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    issue: Mapped["ExternalIssue"] = relationship(foreign_keys=[issue_id])
+
+
+class ExternalIssueRelation(Base):
+    """Linear IssueRelation — blocks/blocked_by/related/duplicate. Stored bidirectionally."""
+    __tablename__ = "external_issue_relations"
+    __table_args__ = (
+        UniqueConstraint("external_id", "relation_type", "issue_id", name="uq_ext_issue_relation_ext_id_type"),
+        Index("ix_ext_issue_relations_issue_type", "issue_id", "relation_type"),
+        Index("ix_ext_issue_relations_related_type", "related_issue_id", "relation_type"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
+    related_issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    issue: Mapped["ExternalIssue"] = relationship(foreign_keys=[issue_id])
+    related_issue: Mapped["ExternalIssue"] = relationship(foreign_keys=[related_issue_id])
+
+
+class ExternalProjectUpdate(Base):
+    """Linear ProjectUpdate — the authoritative project-health narrative (onTrack/atRisk/offTrack)."""
+    __tablename__ = "external_project_updates"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_ext_project_update_ext_id"),
+        Index("ix_ext_project_updates_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("external_projects.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    author_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    author_email: Mapped[str | None] = mapped_column(String(320))
+    body_length: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    body_preview: Mapped[str | None] = mapped_column(String(280))
+    diff_length: Mapped[int | None] = mapped_column(Integer)
+    health: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    reaction_data: Mapped[list | None] = mapped_column(JSONB)
+
+    project: Mapped["ExternalProject"] = relationship(foreign_keys=[project_id])
+    author: Mapped["Developer | None"] = relationship(foreign_keys=[author_developer_id])
 
 
 class RoleDefinition(Base):

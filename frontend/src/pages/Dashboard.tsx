@@ -3,13 +3,14 @@ import { Link } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useRiskSummary, useStalePRs, useTeamStats, useWorkload } from '@/hooks/useStats'
 import { useDevelopers } from '@/hooks/useDevelopers'
-import { useIntegrations } from '@/hooks/useIntegrations'
+import { useIntegrations, useIssueSource } from '@/hooks/useIntegrations'
 import { useSprintVelocity, useWorkAlignment } from '@/hooks/useSprints'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
 import StalePRsSection from '@/components/StalePRsSection'
+import LinearUsageHealthCard from '@/components/linear-health/LinearUsageHealthCard'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -80,6 +81,8 @@ export default function Dashboard() {
   const { data: riskOpen } = useRiskSummary(undefined, dateFrom, dateTo, 'high', 'open')
   const { data: integrations } = useIntegrations()
   const hasLinear = integrations?.some((i) => i.type === 'linear' && i.status === 'active')
+  const { data: issueSource } = useIssueSource()
+  const isLinearPrimary = hasLinear && issueSource?.source === 'linear'
   const { data: velocity } = useSprintVelocity(undefined, 5)
   const { data: alignment } = useWorkAlignment(dateFrom, dateTo)
   const { data: developers } = useDevelopers()
@@ -342,6 +345,9 @@ export default function Dashboard() {
           </div>
         </>
       )}
+
+      {/* Linear Usage Health — only when Linear is primary issue source */}
+      {isLinearPrimary && <LinearUsageHealthCard />}
 
       {/* Sprint Planning Cards — only when Linear is active */}
       {hasLinear && (velocity || alignment) && (

@@ -9,15 +9,33 @@ interface TrendIndicator {
   positive: boolean
 }
 
+interface PairedOutcome {
+  label: string
+  value: string | number
+  tooltip?: string
+}
+
 interface StatCardProps {
   title: string
   value: string | number
   subtitle?: string
   trend?: TrendIndicator
   tooltip?: string
+  // Activity metrics (throughput, PRs opened, issues created, review count)
+  // must declare the outcome metric they're paired against per Phase 11
+  // metrics governance. Renders as a secondary line under the main value with
+  // a separator so readers naturally read them together.
+  pairedOutcome?: PairedOutcome
 }
 
-export default function StatCard({ title, value, subtitle, trend, tooltip }: StatCardProps) {
+export default function StatCard({
+  title,
+  value,
+  subtitle,
+  trend,
+  tooltip,
+  pairedOutcome,
+}: StatCardProps) {
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -57,6 +75,24 @@ export default function StatCard({ title, value, subtitle, trend, tooltip }: Sta
         </div>
         {subtitle && (
           <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
+        )}
+        {pairedOutcome && (
+          <div className="mt-2 flex items-center gap-1.5 border-t pt-2 text-xs text-muted-foreground">
+            <span className="truncate">
+              {pairedOutcome.label}:{' '}
+              <span className="font-medium text-foreground">
+                {pairedOutcome.value}
+              </span>
+            </span>
+            {pairedOutcome.tooltip && (
+              <Tooltip>
+                <TooltipTrigger className="inline-flex text-muted-foreground/60 hover:text-muted-foreground transition-colors">
+                  <HelpCircle className="h-3 w-3" />
+                </TooltipTrigger>
+                <TooltipContent>{pairedOutcome.tooltip}</TooltipContent>
+              </Tooltip>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>

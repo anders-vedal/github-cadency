@@ -3837,3 +3837,486 @@ Linear issues assigned to a developer. **Admin only.**
   }
 ]
 ```
+
+## Linear Insights v2
+
+Endpoints added by the Linear Insights v2 epic. All read-only analytics on top of the
+expanded Linear sync (Phase 01 comments/history/attachments/relations) + GitHub PR timeline
+(Phase 09).
+
+### Phase 02 — Linkage Quality (admin)
+
+#### GET /api/integrations/{integration_id}/linkage-quality
+
+Admin-only summary of PR↔Linear-issue linkage health. Used by `/admin/linkage-quality`.
+
+**Response:** `200 OK`
+```json
+{
+  "total_prs": 1248,
+  "linked_prs": 832,
+  "linkage_rate": 0.667,
+  "by_confidence": {"high": 540, "medium": 250, "low": 78},
+  "by_source": {
+    "linear_attachment": 540,
+    "branch": 180,
+    "title": 70,
+    "body": 78
+  },
+  "unlinked_recent": [
+    {
+      "pr_id": 1234,
+      "number": 567,
+      "title": "Bump deps",
+      "created_at": "2026-04-21T08:15:00Z",
+      "html_url": "https://github.com/acme/repo/pull/567",
+      "author_github_username": "alice",
+      "repo": "acme/repo"
+    }
+  ],
+  "disagreement_prs": [
+    {
+      "pr_id": 999,
+      "number": 42,
+      "title": "Fix auth",
+      "html_url": "https://github.com/acme/repo/pull/42",
+      "repo": "acme/repo",
+      "links": [
+        {"external_issue_id": 5, "identifier": "ENG-100", "link_source": "title", "link_confidence": "medium"},
+        {"external_issue_id": 7, "identifier": "ENG-200", "link_source": "branch", "link_confidence": "medium"}
+      ]
+    }
+  ]
+}
+```
+
+`unlinked_recent` is capped at 50, filtered to PRs created in the last 30 days. `disagreement_prs`
+lists PRs with multiple issue links at the same confidence tier.
+
+#### POST /api/integrations/{integration_id}/relink
+
+Rerun the 4-pass linker (attachment → branch → title → body). Idempotent; upgrades
+existing links to higher confidence when a stronger signal is found. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{"sync_event_id": 42, "status": "completed", "new_links": null}
+```
+
+Writes a `SyncEvent` with `sync_type="linear"`, `sync_scope="Linear PR relink"`.
+Poll `/api/sync/events/{sync_event_id}` for detail.
+
+### Phase 03 — Linear Usage Health
+
+#### GET /api/linear/usage-health?date_from={ISO}&date_to={ISO}
+
+Five-signal dashboard card. Returns `409 Conflict` when Linear is not configured as
+primary issue source — frontend treats this as "hide the card, don't show error".
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `date_from` | `datetime` | now - 30d | ISO 8601 |
+| `date_to` | `datetime` | now | ISO 8601 |
+
+**Response:** `200 OK`
+```json
+{
+  "adoption": {
+    "linked_pr_count": 480,
+    "total_pr_count": 650,
+    "linkage_rate": 0.738,
+    "target": 0.70,
+    "status": "healthy"
+  },
+  "spec_quality": {
+    "median_description_length": 180,
+    "median_comments_before_first_pr": 2.5,
+    "high_comment_issue_pct": 0.08,
+    "status": "healthy"
+  },
+  "autonomy": {
+    "self_picked_count": 120,
+    "pushed_count": 80,
+    "self_picked_pct": 0.60,
+    "median_time_to_assign_s": 7200,
+    "status": "healthy"
+  },
+  "dialogue_health": {
+    "median_comments_per_issue": 2.0,
+    "p90_comments_per_issue": 9,
+    "silent_issue_pct": 0.15,
+    "distribution_shape": "healthy",
+    "status": "healthy"
+  },
+  "creator_outcome": {
+    "top_creators": [
+      {
+        "developer_id": 5,
+        "developer_name": "Alice",
+        "issues_created": 12,
+        "avg_comments_on_their_issues": 1.8,
+        "avg_downstream_pr_review_rounds": 1.2,
+        "sample_size": 8
+      }
+    ]
+  }
+}
+```
+
+`status` values on each signal: `healthy` | `warning` | `critical`. Low-sample rows
+(`sample_size < 5`) should be badged in the UI.
+
+### Phase 04 — Issue Conversations
+
+All endpoints require authentication (not admin-only). Date-range optional; defaults
+to last 30 days.
+
+#### GET /api/conversations/chattiest
+
+Top-N issues by non-system comment count with filters.
+
+**Query params:**
+
+| Param | Type | Default |
+|-------|------|---------|
+| `date_from` | `datetime` | now - 30d |
+| `date_to` | `datetime` | now |
+| `limit` | `int` | 20 (max 200) |
+| `project_id` | `int` | null |
+| `creator_id` | `int` | null |
+| `assignee_id` | `int` | null |
+| `label` | `string` | null (exact-match on issue labels) |
+| `priority` | `int` | null |
+| `has_linked_pr` | `bool` | null |
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "issue_id": 42,
+    "identifier": "ENG-100",
+    "title": "Auth timeout",
+    "url": "https://linear.app/...",
+    "creator": {"id": 5, "name": "Alice"},
+    "assignee": {"id": 6, "name": "Bob"},
+    "project": {"id": 2, "name": "Platform"},
+    "priority_label": "High",
+    "estimate": 3.0,
+    "comment_count": 14,
+    "unique_participants": 5,
+    "first_response_s": 3600,
+    "created_at": "2026-04-01T10:00:00Z",
+    "status": "In Progress",
+    "linked_prs": [
+      {"pr_id": 99, "number": 123, "repo": "acme/repo", "review_round_count": 4, "merged_at": null}
+    ],
+    "avg_linked_pr_review_rounds": 4.0
+  }
+]
+```
+
+#### GET /api/conversations/scatter
+
+Scatter points for comment-count vs review-round correlation.
+
+**Response:** `200 OK`
+```json
+[{"comment_count": 14, "review_rounds": 4, "issue_identifier": "ENG-100", "pr_number": 123}]
+```
+
+#### GET /api/conversations/first-response
+
+Histogram buckets for time-to-first-non-creator-non-system comment.
+
+**Response:** `200 OK`
+```json
+[
+  {"bucket": "<1h", "count": 42},
+  {"bucket": "1-4h", "count": 58},
+  {"bucket": "4-12h", "count": 30},
+  {"bucket": "12h-1d", "count": 18},
+  {"bucket": "1-3d", "count": 11},
+  {"bucket": "3-7d", "count": 5},
+  {"bucket": ">168h", "count": 2},
+  {"bucket": "never", "count": 14}
+]
+```
+
+#### GET /api/conversations/participants
+
+Distribution of unique non-system comment authors per issue.
+
+**Response:** `200 OK`
+```json
+[
+  {"participants": "1", "count": 62},
+  {"participants": "2", "count": 41},
+  {"participants": "3", "count": 28},
+  {"participants": "4-5", "count": 15},
+  {"participants": "6+", "count": 4}
+]
+```
+
+### Phase 05 — Developer Linear profiles
+
+All require **self or admin** — 403 otherwise. Used by Developer Detail page.
+
+#### GET /api/developers/{developer_id}/linear-creator-profile
+
+**Response:** `200 OK`
+```json
+{
+  "issues_created": 24,
+  "issues_created_by_type": {"bug": 8, "feature": 10, "tech_debt": 4, "unknown": 2},
+  "top_labels": [{"label": "backend", "count": 12}, {"label": "auth", "count": 7}],
+  "avg_description_length": 220,
+  "avg_comments_generated": 1.9,
+  "avg_downstream_pr_review_rounds": 1.4,
+  "sample_size_downstream_prs": 18,
+  "self_assigned_pct": 0.45,
+  "median_time_to_close_for_their_issues_s": 345600
+}
+```
+
+#### GET /api/developers/{developer_id}/linear-worker-profile
+
+**Response:** `200 OK`
+```json
+{
+  "issues_worked": 32,
+  "self_picked_count": 14,
+  "pushed_count": 18,
+  "self_picked_pct": 0.437,
+  "median_triage_to_start_s": 172800,
+  "median_cycle_time_s": 259200,
+  "issues_worked_by_status": {"todo": 3, "in_progress": 5, "done": 24},
+  "reassigned_to_other_count": 2
+}
+```
+
+#### GET /api/developers/{developer_id}/linear-shepherd-profile
+
+**Response:** `200 OK`
+```json
+{
+  "comments_on_others_issues": 87,
+  "issues_commented_on": 42,
+  "unique_teams_commented_on": 3,
+  "is_shepherd": true,
+  "top_collaborators": [
+    {"developer_id": 6, "name": "Bob", "count": 22}
+  ]
+}
+```
+
+`is_shepherd` = comments_on_others > max(3 × team_median, 10).
+
+### Phase 06 — Flow Analytics
+
+Driven by `external_issue_history` (Phase 01). Feature-gated by readiness.
+
+#### GET /api/flow/readiness
+
+**Response:** `200 OK`
+```json
+{
+  "ready": true,
+  "days_of_history": 28,
+  "issues_with_history": 142,
+  "threshold_days": 14,
+  "threshold_issues": 100
+}
+```
+
+#### GET /api/flow/status-distribution?date_from&date_to&group_by=all|project|team
+
+p50/p75/p90/p95 time-in-state per status category.
+
+**Response:** `200 OK`
+```json
+[
+  {"status_category": "triage", "p50_s": 3600, "p75_s": 14400, "p90_s": 86400, "p95_s": 172800, "sample_size": 120},
+  {"status_category": "in_progress", "p50_s": 86400, "p75_s": 259200, "p90_s": 604800, "p95_s": 1209600, "sample_size": 95}
+]
+```
+
+#### GET /api/flow/regressions
+
+Issues that transitioned backwards (in_review → in_progress, etc.).
+
+#### GET /api/flow/triage-bounces
+
+Issues that left triage, then re-entered triage.
+
+#### GET /api/flow/refinement-churn
+
+Distribution + top-20 outliers for estimate/priority/project churn before issue start.
+
+**Response:** `200 OK`
+```json
+{
+  "distribution": {"p50": 1, "p90": 4, "mean": 1.8, "total_issues_with_churn": 72},
+  "top": [{"issue_id": 42, "identifier": "ENG-100", "title": "...", "url": "...", "churn_events": 7}]
+}
+```
+
+### Phase 07 — Bottlenecks
+
+All endpoints require authentication.
+
+#### GET /api/bottlenecks/summary
+
+Top 5 active bottlenecks digest for the dashboard/summary card.
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "title": "Review load imbalance",
+    "severity": "warning",
+    "detail": "8 reviewers; top 3 handle 54% of reviews (Gini 0.62)",
+    "drill_path": "/insights/bottlenecks#review-load"
+  }
+]
+```
+
+Severity: `info` | `warning` | `critical`. Summary picks deterministically from: Gini > 0.4,
+any dev WIP > 4, blocked chain depth ≥ 3, any open ping-pong PR, cross-team handoffs > 5.
+
+#### GET /api/bottlenecks/cumulative-flow?cycle_id&project_id&date_from&date_to
+
+Per-day issue count by status category — CFD stacked-area data.
+
+#### GET /api/bottlenecks/wip?threshold=4
+
+Developers with >threshold in_progress issues, with the list of offending issues.
+
+#### GET /api/bottlenecks/review-load
+
+**Response:** `200 OK`
+```json
+{
+  "gini": 0.62,
+  "total_reviews": 432,
+  "total_reviewers": 8,
+  "top_k_share": 0.54,
+  "top_reviewers": [{"reviewer_id": 5, "reviewer_name": "Alice", "review_count": 92}]
+}
+```
+
+#### GET /api/bottlenecks/review-network
+
+Nodes + weighted edges for reviewer→author graph. Client computes community detection.
+
+#### GET /api/bottlenecks/cross-team-handoffs
+
+Issues that moved between cycles belonging to different teams.
+
+#### GET /api/bottlenecks/blocked-chains
+
+Open issues with blocked-by chain depth ≥ 2, sorted depth-desc.
+
+#### GET /api/bottlenecks/ping-pong
+
+PRs with `review_round_count > 3` in range.
+
+#### GET /api/bottlenecks/bus-factor-files?since_days=90&min_authors=2
+
+Files with fewer than `min_authors` distinct PR authors in the last `since_days` days.
+
+#### GET /api/bottlenecks/cycle-histogram
+
+Cycle-time distribution with bimodality detection.
+
+**Response:** `200 OK`
+```json
+{
+  "sample_size": 142,
+  "p50_s": 86400,
+  "p90_s": 604800,
+  "bimodal_analysis": {
+    "is_bimodal": true,
+    "peaks": [{"bin": 2, "count": 35}, {"bin": 7, "count": 28}],
+    "trough_ratio": 0.42,
+    "bins": [3, 12, 35, 18, 8, 4, 10, 28, 15, 9],
+    "bucket_size": 120000.0,
+    "min": 3600.0,
+    "max": 1296000.0
+  }
+}
+```
+
+### Phase 10 — DORA v2
+
+#### GET /api/dora/v2?date_from&date_to&cohort=all|human|ai_reviewed|ai_authored|hybrid
+
+**Response:** `200 OK`
+```json
+{
+  "throughput": {
+    "deployment_frequency": 0.42,
+    "lead_time_hours": 18.5,
+    "mttr_hours": 2.3
+  },
+  "stability": {
+    "change_failure_rate": 6.8,
+    "rework_rate": 8.2
+  },
+  "bands": {
+    "deployment_frequency": "high",
+    "lead_time": "elite",
+    "mttr": "elite",
+    "change_failure_rate": "high",
+    "rework_rate": "high",
+    "overall": "high"
+  },
+  "cohorts": {
+    "human": {"merges": 210, "rework_rate": 7.1, "share_pct": 75.0},
+    "ai_reviewed": {"merges": 60, "rework_rate": 10.0, "share_pct": 21.4},
+    "ai_authored": {"merges": 6, "rework_rate": 16.7, "share_pct": 2.1},
+    "hybrid": {"merges": 4, "rework_rate": 25.0, "share_pct": 1.4}
+  },
+  "date_from": "2026-03-22T...",
+  "date_to": "2026-04-22T..."
+}
+```
+
+Bands use DORA 2024 thresholds (elite/high/medium/low). Rework rate = % of merged PRs
+followed by another merged PR touching shared files within 7 days.
+
+The existing `/api/stats/dora` endpoint is preserved unchanged; `/api/dora/v2` is additive.
+
+### Phase 11 — Metrics Governance
+
+#### GET /api/metrics/catalog
+
+Registry of all exposed metrics (for frontend tooltips, pairing, visibility hints)
+plus the banned-metric list.
+
+**Response:** `200 OK`
+```json
+{
+  "metrics": [
+    {
+      "key": "avg_downstream_pr_review_rounds",
+      "label": "Avg downstream PR review rounds (by ticket creator)",
+      "category": "quality",
+      "is_activity": false,
+      "paired_outcome_key": null,
+      "visibility_default": "self",
+      "is_distribution": false,
+      "goodhart_risk": "high",
+      "goodhart_notes": "Creator-outcome correlation. Default self+admin visibility...",
+      "description": ""
+    }
+  ],
+  "banned": [
+    {"key": "lines_of_code_per_dev", "reason": "LOC is not a productivity metric..."}
+  ]
+}
+```
+
+`visibility_default`: `self` | `team` | `admin`. `category`: `throughput` | `stability` |
+`flow` | `dialogue` | `bottleneck` | `quality`. `goodhart_risk`: `low` | `medium` | `high`.

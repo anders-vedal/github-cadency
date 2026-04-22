@@ -20,7 +20,7 @@ configure_logging(
     json_output=settings.log_format == "json",
 )
 
-from app.api import ai_analysis, developers, goals, integrations, logs, notifications, oauth, relationships, roles, slack, sprints, stats, sync, system, teams, webhooks, work_categories  # noqa: E402
+from app.api import ai_analysis, bottlenecks, classifier_rules, conversations, developers, dora_v2, flow, goals, integrations, linear_health, logs, metrics, notifications, oauth, relationships, roles, slack, sprints, stats, sync, system, teams, webhooks, work_categories  # noqa: E402
 from app.libs.errors import CadencyErrorClassifier, ErrorCategory, ErrorReporter, register_error_handlers  # noqa: E402
 from app.models.database import AsyncSessionLocal  # noqa: E402
 from app.models.models import AIAnalysisSchedule, IntegrationConfig, NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
@@ -37,7 +37,7 @@ _reporter = ErrorReporter(
     app_id="github-cadency",
     app_version=settings.app_version,
     environment=settings.environment,
-    source_id=settings.github_org,
+    source_id=settings.github_org or "devpulse",
 )
 
 
@@ -585,6 +585,13 @@ app.include_router(work_categories.router, prefix="/api", tags=["work-categories
 app.include_router(notifications.router, prefix="/api", tags=["notifications"])
 app.include_router(integrations.router, prefix="/api", tags=["integrations"])
 app.include_router(sprints.router, prefix="/api", tags=["sprints"])
+app.include_router(linear_health.router, prefix="/api", tags=["linear-health"])
+app.include_router(conversations.router, prefix="/api", tags=["conversations"])
+app.include_router(flow.router, prefix="/api", tags=["flow"])
+app.include_router(bottlenecks.router, prefix="/api", tags=["bottlenecks"])
+app.include_router(metrics.router, prefix="/api", tags=["metrics"])
+app.include_router(dora_v2.router, prefix="/api", tags=["dora-v2"])
+app.include_router(classifier_rules.router, prefix="/api", tags=["classifier-rules"])
 app.include_router(system.router, prefix="/api", tags=["system"])
 
 

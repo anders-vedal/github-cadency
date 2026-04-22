@@ -14,7 +14,12 @@ from app.models.models import (
     Developer,
     DeveloperIdentityMap,
     ExternalIssue,
+    ExternalIssueAttachment,
+    ExternalIssueComment,
+    ExternalIssueHistoryEvent,
+    ExternalIssueRelation,
     ExternalProject,
+    ExternalProjectUpdate,
     ExternalSprint,
     IntegrationConfig,
     PRExternalIssueLink,
@@ -27,6 +32,87 @@ logger = get_logger(__name__)
 
 LINEAR_API_URL = "https://api.linear.app/graphql"
 LINEAR_ISSUE_KEY_PATTERN = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
+
+# PR URL patterns used by attachment linker (Phase 02)
+GITHUB_PR_URL_RE = re.compile(r"https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)")
+GITHUB_COMMIT_URL_RE = re.compile(r"https?://github\.com/([^/]+)/([^/]+)/commit/([0-9a-fA-F]+)")
+GITHUB_ISSUE_URL_RE = re.compile(r"https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)")
+
+
+# --- Body preview sanitization (for comments, project updates, attachment titles) ---
+
+_SANITIZE_PATTERNS = [
+    (re.compile(r"[\w.-]+@[\w.-]+\.\w+"), "[EMAIL]"),
+    (re.compile(r"(?i)(Bearer\s+|token[=:\s]+|api[_-]?key[=:\s]+)\S+"), r"\1[CREDENTIAL]"),
+    (re.compile(r"(?i)password[\s:=]+\S+"), "password=[REDACTED]"),
+    (re.compile(r"(?i)secret[\s:=]+\S+"), "secret=[REDACTED]"),
+    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), "[UUID]"),
+    (re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE), "[SHA]"),
+]
+
+
+def sanitize_preview(text: str | None, max_len: int = 280) -> str | None:
+    """Strip emails/tokens/secrets/UUIDs/SHAs from text and truncate to max_len."""
+    if not text:
+        return None
+    out = text
+    for pattern, replacement in _SANITIZE_PATTERNS:
+        out = pattern.sub(replacement, out)
+    # Collapse whitespace for a clean preview
+    out = re.sub(r"\s+", " ", out).strip()
+    if len(out) > max_len:
+        out = out[: max_len - 1] + "…"
+    return out
+
+
+def _derive_sla_status(
+    started_at: datetime | None,
+    breaches_at: datetime | None,
+    high_risk_at: datetime | None,
+    medium_risk_at: datetime | None,
+    *,
+    completed_at: datetime | None = None,
+    cancelled_at: datetime | None = None,
+) -> str | None:
+    """Derive SLA status from Linear's SLA timestamps.
+
+    Linear exposes SLA timestamps on Issue but not the status enum directly.
+    Map: completed before breach → Completed; cancelled → Failed; past breach → Breached;
+    past high-risk threshold → HighRisk; past medium-risk threshold → MediumRisk;
+    SLA active but well within bounds → LowRisk; no SLA → None.
+    """
+    if started_at is None:
+        return None
+    if cancelled_at is not None:
+        return "Failed"
+    if completed_at is not None:
+        if breaches_at is not None and completed_at > breaches_at:
+            return "Breached"
+        return "Completed"
+    now = datetime.now(timezone.utc)
+    if breaches_at is not None and now >= breaches_at:
+        return "Breached"
+    if high_risk_at is not None and now >= high_risk_at:
+        return "HighRisk"
+    if medium_risk_at is not None and now >= medium_risk_at:
+        return "MediumRisk"
+    return "LowRisk"
+
+
+def normalize_attachment_source(source_type: str | None, url: str) -> str:
+    """Classify a Linear attachment into our canonical normalized_source_type values."""
+    url_lower = (url or "").lower()
+    if source_type == "github" or "github.com" in url_lower:
+        if GITHUB_PR_URL_RE.search(url):
+            return "github_pr"
+        if GITHUB_COMMIT_URL_RE.search(url):
+            return "github_commit"
+        if GITHUB_ISSUE_URL_RE.search(url):
+            return "github_issue"
+        return "github"
+    if source_type in ("slack", "figma", "zendesk", "notion"):
+        return source_type
+    return source_type or "other"
 
 
 # --- Linear GraphQL Client ---
@@ -47,37 +133,91 @@ class LinearClient:
         )
 
     async def query(self, query: str, variables: dict | None = None) -> dict:
-        """Execute a GraphQL query against Linear. Returns the 'data' payload."""
+        """Execute a GraphQL query against Linear. Returns the 'data' payload.
+
+        Handles HTTP 429 and HTTP 400 RATELIMITED rate-limit responses with a single retry.
+        Proactively sleeps when nearing Linear's 3M complexity budget (<10% remaining).
+        """
         payload: dict = {"query": query}
         if variables:
             payload["variables"] = variables
         resp = await self._client.post("", json=payload)
 
-        # Handle 429 rate limit with single retry
+        # Rate limit detection: handle HTTP 429 OR HTTP 400 with RATELIMITED error code
+        rate_limited = False
         if resp.status_code == 429:
+            rate_limited = True
+        elif resp.status_code == 400:
+            try:
+                err_body = resp.json()
+                errs = (err_body or {}).get("errors") or []
+                if any((e.get("extensions") or {}).get("code") == "RATELIMITED" for e in errs):
+                    rate_limited = True
+            except Exception:
+                pass
+
+        if rate_limited:
             retry_after = int(resp.headers.get("Retry-After", "60"))
+            reset_at = int(resp.headers.get("X-RateLimit-Requests-Reset",
+                                            resp.headers.get("X-RateLimit-Reset", "0")))
+            now = int(time.time())
+            wait_from_reset = max(0, reset_at - now) if reset_at else 0
+            wait_seconds = max(retry_after, wait_from_reset, 1)
             logger.warning(
-                "Linear rate limited (429)",
+                "Linear rate limited — retrying",
+                status=resp.status_code,
                 retry_after=retry_after,
-                event_type="system.linear_api",
-            )
-            await asyncio.sleep(min(retry_after, 120))
-            resp = await self._client.post("", json=payload)
-
-        resp.raise_for_status()
-
-        # Proactive slowdown when approaching rate limit
-        remaining = int(resp.headers.get("X-RateLimit-Remaining", "100"))
-        if remaining < 10:
-            reset_at = int(resp.headers.get("X-RateLimit-Reset", "0"))
-            wait_seconds = max(0, reset_at - int(time.time())) + 1
-            logger.warning(
-                "Linear rate limit approaching",
-                remaining=remaining,
                 wait_seconds=wait_seconds,
                 event_type="system.linear_api",
             )
-            await asyncio.sleep(min(wait_seconds, 60))
+            await asyncio.sleep(min(wait_seconds, 120))
+            resp = await self._client.post("", json=payload)
+
+        if resp.is_error:
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = None
+            errors = (err_body or {}).get("errors") or []
+            if errors:
+                msg = errors[0].get("message", str(errors))
+                raise LinearAPIError(
+                    f"Linear API {resp.status_code}: {msg}", errors=errors
+                )
+            resp.raise_for_status()
+
+        # Proactive slowdown based on complexity budget (primary) or legacy remaining (fallback)
+        complexity_remaining_s = resp.headers.get("X-RateLimit-Complexity-Remaining")
+        complexity_limit_s = resp.headers.get("X-RateLimit-Complexity-Limit", "3000000")
+        if complexity_remaining_s is not None:
+            try:
+                complexity_remaining = int(complexity_remaining_s)
+                complexity_limit = max(1, int(complexity_limit_s))
+                if complexity_remaining / complexity_limit < 0.10:
+                    reset_at = int(resp.headers.get("X-RateLimit-Complexity-Reset", "0"))
+                    wait_seconds = max(0, reset_at - int(time.time())) + 1
+                    logger.warning(
+                        "Linear complexity budget approaching",
+                        complexity_remaining=complexity_remaining,
+                        complexity_limit=complexity_limit,
+                        wait_seconds=wait_seconds,
+                        event_type="system.linear_api",
+                    )
+                    await asyncio.sleep(min(wait_seconds, 60))
+            except (ValueError, TypeError):
+                pass
+        else:
+            remaining = int(resp.headers.get("X-RateLimit-Remaining", "100"))
+            if remaining < 10:
+                reset_at = int(resp.headers.get("X-RateLimit-Reset", "0"))
+                wait_seconds = max(0, reset_at - int(time.time())) + 1
+                logger.warning(
+                    "Linear rate limit approaching",
+                    remaining=remaining,
+                    wait_seconds=wait_seconds,
+                    event_type="system.linear_api",
+                )
+                await asyncio.sleep(min(wait_seconds, 60))
 
         body = resp.json()
         if "errors" in body:
@@ -415,7 +555,19 @@ async def run_linear_sync(
     )
     _add_log(sync_event, "info", "Starting Linear workspace sync")
 
-    counts = {"projects": 0, "sprints": 0, "issues": 0, "pr_links": 0, "mapped": 0}
+    counts = {
+        "projects": 0,
+        "sprints": 0,
+        "issues": 0,
+        "comments_synced": 0,
+        "history_events_synced": 0,
+        "attachments_synced": 0,
+        "relations_synced": 0,
+        "project_updates_synced": 0,
+        "issue_expansions_triggered": 0,
+        "pr_links": 0,
+        "mapped": 0,
+    }
 
     try:
         async with LinearClient(api_key) as client:
@@ -427,6 +579,16 @@ async def run_linear_sync(
             counts["projects"] = await sync_linear_projects(client, db, integration_id)
             _add_log(sync_event, "info", f"Synced {counts['projects']} projects")
 
+            # 1b. Sync project updates (health narrative)
+            await _check_linear_cancel(db, sync_event)
+            sync_event.current_step = "syncing_project_updates"
+            _add_log(sync_event, "info", "Syncing Linear project updates...")
+            await db.commit()
+            counts["project_updates_synced"] = await sync_linear_project_updates(
+                client, db, integration_id
+            )
+            _add_log(sync_event, "info", f"Synced {counts['project_updates_synced']} project updates")
+
             # 2. Sync cycles (sprints)
             await _check_linear_cancel(db, sync_event)
             sync_event.current_step = "syncing_cycles"
@@ -435,19 +597,36 @@ async def run_linear_sync(
             counts["sprints"] = await sync_linear_cycles(client, db, integration_id)
             _add_log(sync_event, "info", f"Synced {counts['sprints']} sprints")
 
-            # 3. Sync issues (since last sync or all)
+            # 3. Sync issues (since last sync or all) — now includes comments, history,
+            #    attachments, and relations per issue
             await _check_linear_cancel(db, sync_event)
             since = config.last_synced_at
             sync_event.current_step = "syncing_issues"
             mode = f"incremental since {since.strftime('%Y-%m-%d %H:%M')}" if since else "full scan"
-            _add_log(sync_event, "info", f"Syncing issues ({mode})...")
+            _add_log(sync_event, "info", f"Syncing issues with depth ({mode})...")
             await db.commit()
-            counts["issues"] = await sync_linear_issues(
+            issue_counts = await sync_linear_issues(
                 client, db, integration_id, since=since, sync_event=sync_event
             )
-            _add_log(sync_event, "info", f"Synced {counts['issues']} issues")
+            counts["issues"] = issue_counts.get("issues", 0)
+            counts["comments_synced"] = issue_counts.get("comments", 0)
+            counts["history_events_synced"] = issue_counts.get("history", 0)
+            counts["attachments_synced"] = issue_counts.get("attachments", 0)
+            counts["relations_synced"] = issue_counts.get("relations", 0)
+            counts["issue_expansions_triggered"] = issue_counts.get("expansions_triggered", 0)
+            _add_log(
+                sync_event,
+                "info",
+                (
+                    f"Synced {counts['issues']} issues "
+                    f"({counts['comments_synced']} comments, "
+                    f"{counts['history_events_synced']} history events, "
+                    f"{counts['attachments_synced']} attachments, "
+                    f"{counts['relations_synced']} relations)"
+                ),
+            )
 
-            # 4. Link PRs to external issues (incremental after first sync)
+            # 4. Link PRs to external issues (attachment-first via Phase 02 linker)
             await _check_linear_cancel(db, sync_event)
             sync_event.current_step = "linking_prs"
             _add_log(sync_event, "info", "Linking PRs to external issues...")
@@ -602,6 +781,98 @@ async def sync_linear_projects(client: LinearClient, db: AsyncSession, integrati
     return count
 
 
+PROJECT_UPDATES_QUERY = """
+query($cursor: String) {
+    projectUpdates(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+            id
+            project { id }
+            user { id email }
+            body
+            diffMarkdown
+            health
+            createdAt
+            updatedAt
+            editedAt
+            isStale
+            reactionData
+        }
+    }
+}
+"""
+
+
+async def sync_linear_project_updates(
+    client: LinearClient, db: AsyncSession, integration_id: int
+) -> int:
+    """Sync Linear ProjectUpdate entries (authoritative project-health narrative).
+
+    Body is not persisted in full — we keep length + 280-char sanitized preview + health enum.
+    """
+    count = 0
+    cursor = None
+
+    while True:
+        data = await client.query(PROJECT_UPDATES_QUERY, {"cursor": cursor})
+        updates = data.get("projectUpdates", {}) or {}
+        nodes = updates.get("nodes") or []
+
+        for u in nodes:
+            ext_id = u.get("id")
+            if not ext_id:
+                continue
+            project_ref = u.get("project") or {}
+            project_ext_id = project_ref.get("id")
+            if not project_ext_id:
+                continue
+            project_internal_id = await _resolve_external_project(db, project_ext_id)
+            if not project_internal_id:
+                # Project not synced yet; skip until the next cycle
+                continue
+
+            result = await db.execute(
+                select(ExternalProjectUpdate).where(ExternalProjectUpdate.external_id == ext_id)
+            )
+            row = result.scalar_one_or_none()
+            created_at = _parse_datetime(u.get("createdAt")) or datetime.now(timezone.utc)
+            if not row:
+                row = ExternalProjectUpdate(
+                    project_id=project_internal_id,
+                    external_id=ext_id,
+                    created_at=created_at,
+                )
+                db.add(row)
+
+            user = u.get("user") or {}
+            author_email = user.get("email")
+            row.author_email = author_email
+            if author_email:
+                row.author_developer_id = await _resolve_developer_by_email(db, author_email)
+            body = u.get("body") or ""
+            diff = u.get("diffMarkdown") or ""
+            row.body_length = len(body)
+            row.body_preview = sanitize_preview(body, 280)
+            row.diff_length = len(diff) if diff else None
+            row.health = u.get("health")
+            row.updated_at = _parse_datetime(u.get("updatedAt"))
+            row.edited_at = _parse_datetime(u.get("editedAt"))
+            row.is_stale = bool(u.get("isStale"))
+            row.reaction_data = u.get("reactionData")
+
+            count += 1
+
+        await db.commit()
+
+        page_info = updates.get("pageInfo", {}) or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+
+    logger.info("Synced Linear project updates", count=count, event_type="system.sync")
+    return count
+
+
 CYCLES_QUERY = """
 query($cursor: String) {
     cycles(first: 50, after: $cursor) {
@@ -616,7 +887,6 @@ query($cursor: String) {
             progress
             scopeHistory
             completedScopeHistory
-            url
             team { id key name }
             issues { nodes { id } }
             uncompletedIssuesUponClose { nodes { id } }
@@ -671,8 +941,6 @@ async def sync_linear_cycles(client: LinearClient, db: AsyncSession, integration
             else:
                 sprint.state = "active"
 
-            sprint.url = c.get("url")
-
             # Scope metrics from history arrays
             scope_history = c.get("scopeHistory") or []
             completed_history = c.get("completedScopeHistory") or []
@@ -725,7 +993,7 @@ _ISSUES_FIELDS = """
             priority
             priorityLabel
             estimate
-            labels { nodes { name } }
+            labels { nodes { id name } }
             assignee { id email displayName }
             creator { id email displayName }
             project { id }
@@ -737,6 +1005,76 @@ _ISSUES_FIELDS = """
             canceledAt
             updatedAt
             url
+            slaStartedAt
+            slaBreachesAt
+            slaHighRiskAt
+            slaMediumRiskAt
+            slaType
+            triagedAt
+            subscribers { nodes { id } }
+            reactionData
+            comments(first: 50) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                    id
+                    parent { id }
+                    user { id email }
+                    externalUser { id }
+                    botActor { type subType name }
+                    createdAt
+                    updatedAt
+                    editedAt
+                    body
+                    reactionData
+                }
+            }
+            history(first: 50) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                    id
+                    createdAt
+                    actor { id email }
+                    botActor { type subType name }
+                    fromState { id name type }
+                    toState { id name type }
+                    fromAssignee { id email }
+                    toAssignee { id email }
+                    fromEstimate
+                    toEstimate
+                    fromPriority
+                    toPriority
+                    fromCycle { id }
+                    toCycle { id }
+                    fromProject { id }
+                    toProject { id }
+                    fromParent { id }
+                    toParent { id }
+                    addedLabelIds
+                    removedLabelIds
+                    archived
+                    autoArchived
+                    autoClosed
+                }
+            }
+            attachments(first: 50) {
+                nodes {
+                    id
+                    url
+                    sourceType
+                    title
+                    metadata
+                    createdAt
+                    updatedAt
+                    creator { id email }
+                }
+            }
+            relations(first: 50) {
+                nodes {
+                    id
+                    type
+                    relatedIssue { id }
+                }
+            }
         }
 """
 
@@ -757,6 +1095,123 @@ query($cursor: String) {
 """
 
 
+# Per-issue inner-page pagination for comments/history when the initial batched
+# fetch returned hasNextPage=true. Selections must stay in sync with the comments
+# and history fragments inside `_ISSUES_FIELDS`.
+ISSUE_COMMENTS_PAGE_QUERY = """
+query($issueId: String!, $cursor: String) {
+    issue(id: $issueId) {
+        comments(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+                id
+                parent { id }
+                user { id email }
+                externalUser { id }
+                botActor { type subType name }
+                createdAt
+                updatedAt
+                editedAt
+                body
+                reactionData
+            }
+        }
+    }
+}
+"""
+
+ISSUE_HISTORY_PAGE_QUERY = """
+query($issueId: String!, $cursor: String) {
+    issue(id: $issueId) {
+        history(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+                id
+                createdAt
+                actor { id email }
+                botActor { type subType name }
+                fromState { id name type }
+                toState { id name type }
+                fromAssignee { id email }
+                toAssignee { id email }
+                fromEstimate
+                toEstimate
+                fromPriority
+                toPriority
+                fromCycle { id }
+                toCycle { id }
+                fromProject { id }
+                toProject { id }
+                fromParent { id }
+                toParent { id }
+                addedLabelIds
+                removedLabelIds
+                archived
+                autoArchived
+                autoClosed
+            }
+        }
+    }
+}
+"""
+
+# Hard cap so a pathological issue can't spin forever; 50 pages * 100 items = 5000
+# comments or history events per issue. Real-world issues are orders of magnitude below.
+_MAX_INNER_PAGES = 50
+
+
+async def _fetch_all_comment_pages(
+    client: LinearClient,
+    issue_external_id: str,
+    initial_end_cursor: str | None,
+) -> list[dict]:
+    """Walk the comments connection for one issue from ``initial_end_cursor`` to exhaustion."""
+    collected: list[dict] = []
+    cursor = initial_end_cursor
+    for _ in range(_MAX_INNER_PAGES):
+        if not cursor:
+            break
+        data = await client.query(
+            ISSUE_COMMENTS_PAGE_QUERY,
+            {"issueId": issue_external_id, "cursor": cursor},
+        )
+        issue_data = data.get("issue") or {}
+        conn = issue_data.get("comments") or {}
+        nodes = conn.get("nodes") or []
+        collected.extend(nodes)
+        page_info = conn.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+    return collected
+
+
+async def _fetch_all_history_pages(
+    client: LinearClient,
+    issue_external_id: str,
+    initial_end_cursor: str | None,
+) -> list[dict]:
+    """Walk the history connection for one issue from ``initial_end_cursor`` to exhaustion."""
+    collected: list[dict] = []
+    cursor = initial_end_cursor
+    for _ in range(_MAX_INNER_PAGES):
+        if not cursor:
+            break
+        data = await client.query(
+            ISSUE_HISTORY_PAGE_QUERY,
+            {"issueId": issue_external_id, "cursor": cursor},
+        )
+        issue_data = data.get("issue") or {}
+        conn = issue_data.get("history") or {}
+        nodes = conn.get("nodes") or []
+        collected.extend(nodes)
+        page_info = conn.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+    return collected
+
+
 def _classify_external_issue(issue: ExternalIssue, rules: list) -> tuple[str, str]:
     """Classify an external issue using the same work category rules as GitHub issues."""
     from app.services.work_categories import classify_work_item_with_rules
@@ -765,18 +1220,367 @@ def _classify_external_issue(issue: ExternalIssue, rules: list) -> tuple[str, st
     return classify_work_item_with_rules(labels, issue.title, rules, issue_type=issue.issue_type)
 
 
+# --- Sync helpers for per-issue expansions (comments / history / attachments / relations) ---
+
+
+async def _persist_issue_comments(
+    db: AsyncSession,
+    issue: ExternalIssue,
+    comment_nodes: list[dict],
+    *,
+    email_cache: dict[str, int | None] | None = None,
+) -> tuple[int, list[str]]:
+    """Upsert comment rows for an issue. Returns (count, external_ids_processed).
+
+    Replies are resolved after all comments are inserted so parent IDs can resolve.
+    """
+    if not comment_nodes:
+        return 0, []
+
+    # Preload existing comments keyed by external_id to map parent refs
+    ext_ids = [c["id"] for c in comment_nodes if c.get("id")]
+    existing_rows = await db.execute(
+        select(ExternalIssueComment).where(ExternalIssueComment.external_id.in_(ext_ids))
+    )
+    existing_by_ext_id: dict[str, ExternalIssueComment] = {
+        row.external_id: row for row in existing_rows.scalars().all()
+    }
+
+    count = 0
+    # First pass: upsert without parent (we'll link parents in pass 2)
+    pending_parents: list[tuple[str, str]] = []  # [(child_ext_id, parent_ext_id)]
+    for c in comment_nodes:
+        ext_id = c.get("id")
+        if not ext_id:
+            continue
+        row = existing_by_ext_id.get(ext_id)
+        bot_actor_raw = c.get("botActor")  # dict if bot, None if human
+        user = c.get("user") or {}
+        ext_user = c.get("externalUser") or {}
+        author_email = user.get("email")
+        body = c.get("body") or ""
+        created_at = _parse_datetime(c.get("createdAt")) or datetime.now(timezone.utc)
+
+        author_dev_id = None
+        if author_email:
+            author_dev_id = await _resolve_developer_by_email(db, author_email, email_cache)
+
+        if not row:
+            row = ExternalIssueComment(
+                issue_id=issue.id,
+                external_id=ext_id,
+                created_at=created_at,
+            )
+            db.add(row)
+            existing_by_ext_id[ext_id] = row
+
+        row.author_developer_id = author_dev_id
+        row.author_email = author_email
+        row.external_user_id = ext_user.get("id") if ext_user else user.get("id")
+        row.updated_at = _parse_datetime(c.get("updatedAt"))
+        row.edited_at = _parse_datetime(c.get("editedAt"))
+        row.body_length = len(body)
+        row.body_preview = sanitize_preview(body, 280)
+        row.reaction_data = c.get("reactionData")
+        # Linear sets botActor to a populated object for bot/integration comments,
+        # null for human comments. Treat any non-null botActor as system-generated.
+        row.is_system_generated = bot_actor_raw is not None
+        row.bot_actor_type = (bot_actor_raw or {}).get("type")
+
+        parent = c.get("parent") or {}
+        if parent and parent.get("id"):
+            pending_parents.append((ext_id, parent["id"]))
+
+        count += 1
+
+    # Flush so new rows have IDs for parent linking
+    if count:
+        await db.flush()
+
+    # Second pass: resolve parent refs
+    for child_ext_id, parent_ext_id in pending_parents:
+        child = existing_by_ext_id.get(child_ext_id)
+        parent = existing_by_ext_id.get(parent_ext_id)
+        if child and parent and child.id != parent.id:
+            child.parent_comment_id = parent.id
+
+    return count, ext_ids
+
+
+async def _persist_issue_history(
+    db: AsyncSession,
+    issue: ExternalIssue,
+    history_nodes: list[dict],
+    *,
+    email_cache: dict[str, int | None] | None = None,
+) -> int:
+    """Upsert IssueHistory events for an issue. Returns count persisted."""
+    if not history_nodes:
+        return 0
+
+    ext_ids = [h["id"] for h in history_nodes if h.get("id")]
+    existing_rows = await db.execute(
+        select(ExternalIssueHistoryEvent).where(ExternalIssueHistoryEvent.external_id.in_(ext_ids))
+    )
+    existing_by_ext_id: dict[str, ExternalIssueHistoryEvent] = {
+        row.external_id: row for row in existing_rows.scalars().all()
+    }
+
+    count = 0
+    for h in history_nodes:
+        ext_id = h.get("id")
+        if not ext_id:
+            continue
+        row = existing_by_ext_id.get(ext_id)
+        changed_at = _parse_datetime(h.get("createdAt")) or datetime.now(timezone.utc)
+        actor = h.get("actor") or {}
+        actor_email = actor.get("email")
+        bot_actor_raw = h.get("botActor")  # dict if bot, None if human / system
+        bot_type = (bot_actor_raw or {}).get("type")
+
+        actor_dev_id = None
+        if actor_email:
+            actor_dev_id = await _resolve_developer_by_email(db, actor_email, email_cache)
+
+        if not row:
+            row = ExternalIssueHistoryEvent(
+                issue_id=issue.id,
+                external_id=ext_id,
+                changed_at=changed_at,
+            )
+            db.add(row)
+            existing_by_ext_id[ext_id] = row
+
+        row.actor_developer_id = actor_dev_id
+        row.actor_email = actor_email
+        row.bot_actor_type = bot_type
+
+        from_state = h.get("fromState") or {}
+        to_state = h.get("toState") or {}
+        row.from_state = from_state.get("name")
+        row.to_state = to_state.get("name")
+        row.from_state_category = _map_status_type(from_state.get("type"))
+        row.to_state_category = _map_status_type(to_state.get("type"))
+
+        from_assignee = h.get("fromAssignee") or {}
+        to_assignee = h.get("toAssignee") or {}
+        if from_assignee.get("email"):
+            row.from_assignee_id = await _resolve_developer_by_email(
+                db, from_assignee["email"], email_cache
+            )
+        if to_assignee.get("email"):
+            row.to_assignee_id = await _resolve_developer_by_email(
+                db, to_assignee["email"], email_cache
+            )
+
+        row.from_estimate = h.get("fromEstimate")
+        row.to_estimate = h.get("toEstimate")
+        # Linear schema types priority as Float; cast to int for our column.
+        from_pri = h.get("fromPriority")
+        to_pri = h.get("toPriority")
+        row.from_priority = int(from_pri) if from_pri is not None else None
+        row.to_priority = int(to_pri) if to_pri is not None else None
+
+        from_cycle = h.get("fromCycle") or {}
+        to_cycle = h.get("toCycle") or {}
+        if from_cycle.get("id"):
+            row.from_cycle_id = await _resolve_external_sprint(db, from_cycle["id"])
+        if to_cycle.get("id"):
+            row.to_cycle_id = await _resolve_external_sprint(db, to_cycle["id"])
+
+        from_project = h.get("fromProject") or {}
+        to_project = h.get("toProject") or {}
+        if from_project.get("id"):
+            row.from_project_id = await _resolve_external_project(db, from_project["id"])
+        if to_project.get("id"):
+            row.to_project_id = await _resolve_external_project(db, to_project["id"])
+
+        from_parent = h.get("fromParent") or {}
+        to_parent = h.get("toParent") or {}
+        if from_parent.get("id"):
+            row.from_parent_id = await _resolve_external_issue(db, from_parent["id"])
+        if to_parent.get("id"):
+            row.to_parent_id = await _resolve_external_issue(db, to_parent["id"])
+
+        row.added_label_ids = h.get("addedLabelIds")
+        row.removed_label_ids = h.get("removedLabelIds")
+        row.archived = bool(h.get("archived"))
+        row.auto_archived = bool(h.get("autoArchived"))
+        row.auto_closed = bool(h.get("autoClosed"))
+
+        count += 1
+
+    return count
+
+
+async def _persist_issue_attachments(
+    db: AsyncSession,
+    issue: ExternalIssue,
+    attachment_nodes: list[dict],
+    *,
+    email_cache: dict[str, int | None] | None = None,
+) -> int:
+    """Upsert attachment rows for an issue. Returns count persisted."""
+    if not attachment_nodes:
+        return 0
+
+    ext_ids = [a["id"] for a in attachment_nodes if a.get("id")]
+    existing_rows = await db.execute(
+        select(ExternalIssueAttachment).where(ExternalIssueAttachment.external_id.in_(ext_ids))
+    )
+    existing_by_ext_id: dict[str, ExternalIssueAttachment] = {
+        row.external_id: row for row in existing_rows.scalars().all()
+    }
+
+    count = 0
+    for a in attachment_nodes:
+        ext_id = a.get("id")
+        if not ext_id:
+            continue
+        url = a.get("url") or ""
+        row = existing_by_ext_id.get(ext_id)
+        created_at = _parse_datetime(a.get("createdAt")) or datetime.now(timezone.utc)
+        creator = a.get("creator") or {}
+        creator_email = creator.get("email")
+        actor_dev_id = None
+        if creator_email:
+            actor_dev_id = await _resolve_developer_by_email(db, creator_email, email_cache)
+
+        if not row:
+            row = ExternalIssueAttachment(
+                issue_id=issue.id,
+                external_id=ext_id,
+                url=url,
+                created_at=created_at,
+            )
+            db.add(row)
+            existing_by_ext_id[ext_id] = row
+
+        row.url = url
+        row.source_type = a.get("sourceType")
+        row.normalized_source_type = normalize_attachment_source(a.get("sourceType"), url)
+        title = a.get("title")
+        row.title = sanitize_preview(title, 500) if title else None
+        row.attachment_metadata = a.get("metadata")
+        row.updated_at = _parse_datetime(a.get("updatedAt"))
+        row.actor_developer_id = actor_dev_id
+        row.is_system_generated = creator_email is None  # integration-attached = no creator
+
+        count += 1
+
+    return count
+
+
+async def _persist_issue_relations(
+    db: AsyncSession,
+    issue: ExternalIssue,
+    relation_nodes: list[dict],
+) -> int:
+    """Upsert IssueRelation rows bidirectionally. Returns count of rows persisted.
+
+    Linear emits a single relation node but we store both directions so queries on
+    either side don't require a UNION.
+    """
+    if not relation_nodes:
+        return 0
+
+    count = 0
+    for r in relation_nodes:
+        ext_id = r.get("id")
+        rel_type = r.get("type")
+        related = r.get("relatedIssue") or {}
+        related_ext_id = related.get("id")
+        if not (ext_id and rel_type and related_ext_id):
+            continue
+
+        related_internal_id = await _resolve_external_issue(db, related_ext_id)
+        if not related_internal_id:
+            continue  # the related issue isn't in our DB yet; skip until next sync
+
+        created_at = datetime.now(timezone.utc)
+        # Forward relation: issue -> related with rel_type
+        await _upsert_relation_row(db, ext_id, rel_type, issue.id, related_internal_id, created_at)
+        count += 1
+        # Inverse: if blocks, store blocked_by reverse. If related/duplicate, mirror type.
+        inverse_type = _inverse_relation_type(rel_type)
+        if inverse_type:
+            await _upsert_relation_row(
+                db, ext_id, inverse_type, related_internal_id, issue.id, created_at
+            )
+            count += 1
+
+    return count
+
+
+def _inverse_relation_type(rel_type: str) -> str | None:
+    if rel_type == "blocks":
+        return "blocked_by"
+    if rel_type == "blocked_by":
+        return "blocks"
+    if rel_type in ("related", "duplicate"):
+        return rel_type
+    return None
+
+
+async def _upsert_relation_row(
+    db: AsyncSession,
+    external_id: str,
+    relation_type: str,
+    issue_id: int,
+    related_issue_id: int,
+    created_at: datetime,
+) -> None:
+    result = await db.execute(
+        select(ExternalIssueRelation).where(
+            ExternalIssueRelation.external_id == external_id,
+            ExternalIssueRelation.relation_type == relation_type,
+            ExternalIssueRelation.issue_id == issue_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        row.related_issue_id = related_issue_id
+    else:
+        db.add(
+            ExternalIssueRelation(
+                issue_id=issue_id,
+                related_issue_id=related_issue_id,
+                external_id=external_id,
+                relation_type=relation_type,
+                created_at=created_at,
+            )
+        )
+
+
 async def sync_linear_issues(
     client: LinearClient,
     db: AsyncSession,
     integration_id: int,
     since: datetime | None = None,
     sync_event: SyncEvent | None = None,
-) -> int:
-    """Sync issues from Linear updated since the given timestamp. Returns count synced."""
+) -> dict:
+    """Sync issues from Linear updated since the given timestamp.
+
+    Returns a dict of counters: ``{"issues": N, "comments": N, "history": N,
+    "attachments": N, "relations": N, "expansions_triggered": N}``.
+    """
     # Load classification rules once for the entire sync
     from app.services.work_categories import get_all_rules
     classification_rules = await get_all_rules(db)
 
+    # Preload email→developer_id to avoid thousands of per-row SELECTs during
+    # comment/history persistence. One SELECT up front beats 6000+ lookups on a
+    # full 588-issue sync.
+    email_cache = await _build_email_cache(db)
+
+    counts = {
+        "issues": 0,
+        "comments": 0,
+        "history": 0,
+        "attachments": 0,
+        "relations": 0,
+        "expansions_triggered": 0,
+    }
     count = 0
     cursor = None
     updated_after = since.isoformat() if since else None
@@ -830,7 +1634,7 @@ async def sync_linear_issues(
             if assignee:
                 issue.assignee_email = assignee.get("email")
                 issue.assignee_developer_id = await _resolve_developer_by_email(
-                    db, assignee.get("email")
+                    db, assignee.get("email"), email_cache
                 )
 
             # Creator
@@ -838,7 +1642,7 @@ async def sync_linear_issues(
             if creator:
                 issue.creator_email = creator.get("email")
                 issue.creator_developer_id = await _resolve_developer_by_email(
-                    db, creator.get("email")
+                    db, creator.get("email"), email_cache
                 )
 
             # Foreign keys to other synced entities
@@ -866,6 +1670,31 @@ async def sync_linear_issues(
             issue.updated_at = _parse_datetime(i.get("updatedAt")) or datetime.now(timezone.utc)
             issue.url = i.get("url")
 
+            # SLA fields (Phase 01) — slaStatus is not a field on Issue, derive from timestamps
+            issue.sla_started_at = _parse_datetime(i.get("slaStartedAt"))
+            issue.sla_breaches_at = _parse_datetime(i.get("slaBreachesAt"))
+            issue.sla_high_risk_at = _parse_datetime(i.get("slaHighRiskAt"))
+            issue.sla_medium_risk_at = _parse_datetime(i.get("slaMediumRiskAt"))
+            issue.sla_type = i.get("slaType")
+            issue.sla_status = _derive_sla_status(
+                issue.sla_started_at,
+                issue.sla_breaches_at,
+                issue.sla_high_risk_at,
+                issue.sla_medium_risk_at,
+                completed_at=issue.completed_at,
+                cancelled_at=issue.cancelled_at,
+            )
+
+            # Triage (Phase 01)
+            issue.triaged_at = _parse_datetime(i.get("triagedAt"))
+
+            # Subscriber count (cheap bus-factor signal)
+            subs = (i.get("subscribers") or {}).get("nodes") or []
+            issue.subscribers_count = len(subs)
+
+            # Reactions
+            issue.reaction_data = i.get("reactionData")
+
             # Compute durations
             if issue.status_category != "triage" and issue.created_at and issue.started_at:
                 issue.triage_duration_s = int(
@@ -882,7 +1711,70 @@ async def sync_linear_issues(
                 issue.work_category = cat
                 issue.work_category_source = source
 
+            # Flush to ensure issue.id is available for child rows
+            if not issue.id:
+                await db.flush()
+
+            # Persist per-issue expansions (comments, history, attachments, relations).
+            # When the batched issues query hit the inner page limit (50 items), walk
+            # the remaining pages so issues with long histories aren't silently truncated.
+            comments_conn = i.get("comments") or {}
+            comment_nodes = list(comments_conn.get("nodes") or [])
+            comments_page_info = comments_conn.get("pageInfo") or {}
+            if comments_page_info.get("hasNextPage"):
+                counts["expansions_triggered"] += 1
+                try:
+                    extra = await _fetch_all_comment_pages(
+                        client, i["id"], comments_page_info.get("endCursor")
+                    )
+                    comment_nodes.extend(extra)
+                except LinearAPIError as exc:
+                    logger.warning(
+                        "Failed to paginate Linear comments for issue",
+                        issue_external_id=i.get("id"),
+                        error=str(exc),
+                        event_type="system.sync",
+                    )
+            if comment_nodes:
+                c_count, _ = await _persist_issue_comments(
+                    db, issue, comment_nodes, email_cache=email_cache
+                )
+                counts["comments"] += c_count
+
+            history_conn = i.get("history") or {}
+            history_nodes = list(history_conn.get("nodes") or [])
+            history_page_info = history_conn.get("pageInfo") or {}
+            if history_page_info.get("hasNextPage"):
+                counts["expansions_triggered"] += 1
+                try:
+                    extra = await _fetch_all_history_pages(
+                        client, i["id"], history_page_info.get("endCursor")
+                    )
+                    history_nodes.extend(extra)
+                except LinearAPIError as exc:
+                    logger.warning(
+                        "Failed to paginate Linear history for issue",
+                        issue_external_id=i.get("id"),
+                        error=str(exc),
+                        event_type="system.sync",
+                    )
+            if history_nodes:
+                counts["history"] += await _persist_issue_history(
+                    db, issue, history_nodes, email_cache=email_cache
+                )
+
+            attachment_nodes = (i.get("attachments") or {}).get("nodes") or []
+            if attachment_nodes:
+                counts["attachments"] += await _persist_issue_attachments(
+                    db, issue, attachment_nodes, email_cache=email_cache
+                )
+
+            relation_nodes = (i.get("relations") or {}).get("nodes") or []
+            if relation_nodes:
+                counts["relations"] += await _persist_issue_relations(db, issue, relation_nodes)
+
             count += 1
+            counts["issues"] = count
 
             if count % 50 == 0:
                 if sync_event:
@@ -899,83 +1791,243 @@ async def sync_linear_issues(
             break
         cursor = page_info.get("endCursor")
 
-    logger.info("Synced Linear issues", count=count, event_type="system.sync")
-    return count
+    logger.info(
+        "Synced Linear issues",
+        count=count,
+        comments=counts["comments"],
+        history=counts["history"],
+        attachments=counts["attachments"],
+        relations=counts["relations"],
+        event_type="system.sync",
+    )
+    return counts
 
 
 # --- PR ↔ External Issue linking ---
 
 
+# Link confidence tier per source (Phase 02)
+LINK_SOURCE_CONFIDENCE = {
+    "linear_attachment": "high",
+    "branch": "medium",
+    "title": "medium",
+    "body": "low",
+    "commit_message": "low",
+}
+
+# Confidence ranking for upgrade logic (higher tier wins)
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+from app.models.models import Repository  # noqa: E402 — imported here to avoid circular at top
+
+
+async def _load_pr_id_by_github_pr_url(
+    db: AsyncSession, url: str
+) -> int | None:
+    """Parse a GitHub PR URL and resolve to an internal PullRequest.id."""
+    m = GITHUB_PR_URL_RE.search(url)
+    if not m:
+        return None
+    owner, name, number = m.group(1), m.group(2), int(m.group(3))
+    full_name = f"{owner}/{name}"
+    result = await db.execute(
+        select(PullRequest.id)
+        .join(Repository, PullRequest.repo_id == Repository.id)
+        .where(
+            func.lower(Repository.full_name) == full_name.lower(),
+            PullRequest.number == number,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _upsert_pr_issue_link(
+    db: AsyncSession,
+    pr_id: int,
+    issue_id: int,
+    link_source: str,
+    existing_by_pair: dict[tuple[int, int], PRExternalIssueLink],
+) -> bool:
+    """Upsert a PR-issue link. Returns True if newly created, False if existing.
+
+    Existing links are upgraded if the new source has a higher confidence tier.
+    """
+    confidence = LINK_SOURCE_CONFIDENCE.get(link_source, "low")
+    key = (pr_id, issue_id)
+    existing = existing_by_pair.get(key)
+    if existing:
+        # Upgrade confidence if new source is stronger
+        # Default to -1 (below "low") so unknown / null stored confidence still upgrades cleanly.
+        if _CONFIDENCE_RANK[confidence] > _CONFIDENCE_RANK.get(existing.link_confidence or "", -1):
+            existing.link_source = link_source
+            existing.link_confidence = confidence
+        return False
+    link = PRExternalIssueLink(
+        pull_request_id=pr_id,
+        external_issue_id=issue_id,
+        link_source=link_source,
+        link_confidence=confidence,
+    )
+    db.add(link)
+    existing_by_pair[key] = link
+    return True
+
+
 async def link_prs_to_external_issues(
     db: AsyncSession, integration_id: int, since: datetime | None = None
 ) -> int:
-    """Scan PR titles and branches for Linear issue keys, create links. Returns count created.
+    """Run the 4-pass PR↔issue linker.
 
-    When ``since`` is provided, only PRs updated after that timestamp are scanned
-    (incremental linking). Pass ``None`` for a full scan on first sync.
+    Pass 1 (high): Linear GitHub attachments (`external_issue_attachments` with
+    ``normalized_source_type == 'github_pr'``) → resolve URL → PR.id.
+    Pass 2 (medium): regex on PR head_branch.
+    Pass 3 (medium): regex on PR title.
+    Pass 4 (low): regex on PR body.
+
+    Existing links are upgraded to higher confidence when a stronger signal is found.
+    A PR may link to multiple issues (each signal creates a row independently).
+
+    Returns count of *newly created* links (upgrades don't count).
+
+    When ``since`` is provided, regex passes 2-4 only scan PRs updated since then
+    (incremental). The attachment pass always scans all attachments because Linear
+    attachments update independently of PR updated_at.
     """
-    # Load all known identifiers
+    count = 0
+
+    # Load known issue identifier → internal id (for regex passes)
     result = await db.execute(
         select(ExternalIssue.id, ExternalIssue.identifier).where(
             ExternalIssue.integration_id == integration_id
         )
     )
-    issue_map = {row.identifier: row.id for row in result.all()}
-    if not issue_map:
-        return 0
+    issue_id_by_identifier = {row.identifier: row.id for row in result.all()}
 
-    # Load existing links to avoid duplicates
-    result = await db.execute(
-        select(PRExternalIssueLink.pull_request_id, PRExternalIssueLink.external_issue_id)
-    )
-    existing_links = {(row[0], row[1]) for row in result.all()}
+    # Load existing links into a map for upserts
+    result = await db.execute(select(PRExternalIssueLink))
+    existing_by_pair: dict[tuple[int, int], PRExternalIssueLink] = {
+        (r.pull_request_id, r.external_issue_id): r for r in result.scalars().all()
+    }
 
-    # Process PRs in batches
-    count = 0
-    batch_size = 500
-    offset = 0
-
-    while True:
-        pr_query = (
-            select(PullRequest.id, PullRequest.title, PullRequest.head_branch, PullRequest.body)
-            .order_by(PullRequest.id)
-            .limit(batch_size)
-            .offset(offset)
+    # --- Pass 1: attachment-first (high confidence) ---
+    # Scan ExternalIssueAttachment rows with normalized_source_type == 'github_pr'
+    # that belong to issues of this integration.
+    att_result = await db.execute(
+        select(
+            ExternalIssueAttachment.id,
+            ExternalIssueAttachment.url,
+            ExternalIssueAttachment.issue_id,
         )
-        if since is not None:
-            pr_query = pr_query.where(PullRequest.updated_at >= since)
-        result = await db.execute(pr_query)
-        rows = result.all()
-        if not rows:
-            break
+        .join(ExternalIssue, ExternalIssueAttachment.issue_id == ExternalIssue.id)
+        .where(
+            ExternalIssue.integration_id == integration_id,
+            ExternalIssueAttachment.normalized_source_type == "github_pr",
+        )
+    )
+    for _att_id, url, issue_id in att_result.all():
+        pr_id = await _load_pr_id_by_github_pr_url(db, url)
+        if not pr_id:
+            continue
+        if await _upsert_pr_issue_link(
+            db, pr_id, issue_id, "linear_attachment", existing_by_pair
+        ):
+            count += 1
 
-        for pr_id, title, branch, body in rows:
-            sources = [
-                ("title", title or ""),
-                ("branch", branch or ""),
-                ("body", body or ""),
-            ]
-            for source_name, text in sources:
-                keys = extract_linear_keys(text)
-                for key in keys:
-                    issue_id = issue_map.get(key)
-                    if issue_id and (pr_id, issue_id) not in existing_links:
-                        existing_links.add((pr_id, issue_id))
-                        link = PRExternalIssueLink(
-                            pull_request_id=pr_id,
-                            external_issue_id=issue_id,
-                            link_source=source_name,
-                        )
-                        db.add(link)
-                        count += 1
+    # --- Passes 2-4: regex-based on PR text fields ---
+    if issue_id_by_identifier:
+        batch_size = 500
+        offset = 0
+        while True:
+            pr_query = (
+                select(
+                    PullRequest.id,
+                    PullRequest.title,
+                    PullRequest.head_branch,
+                    PullRequest.body,
+                )
+                .order_by(PullRequest.id)
+                .limit(batch_size)
+                .offset(offset)
+            )
+            if since is not None:
+                pr_query = pr_query.where(PullRequest.updated_at >= since)
+            rows = (await db.execute(pr_query)).all()
+            if not rows:
+                break
 
-        offset += batch_size
+            for pr_id, title, branch, body in rows:
+                # Passes in priority order: branch > title > body
+                for source_name, text in (
+                    ("branch", branch or ""),
+                    ("title", title or ""),
+                    ("body", body or ""),
+                ):
+                    keys = extract_linear_keys(text)
+                    for key in keys:
+                        issue_id = issue_id_by_identifier.get(key)
+                        if not issue_id:
+                            continue
+                        if await _upsert_pr_issue_link(
+                            db, pr_id, issue_id, source_name, existing_by_pair
+                        ):
+                            count += 1
 
-    if count:
+            offset += batch_size
+
+    if count or existing_by_pair:
         await db.commit()
 
     logger.info("Linked PRs to external issues", count=count, event_type="system.sync")
     return count
+
+
+async def run_linear_relink(
+    db: AsyncSession, integration_id: int
+) -> SyncEvent:
+    """Convenience wrapper — rerun the full 4-pass linker as a tracked SyncEvent.
+
+    Used by the admin "Rerun linker" button. Idempotent; upgrades existing links
+    to the best available confidence tier.
+    """
+    config = await db.get(IntegrationConfig, integration_id)
+    if not config or config.type != "linear":
+        raise ValueError(f"Linear integration {integration_id} not found")
+
+    sync_event = SyncEvent(
+        sync_type="linear",
+        status="started",
+        started_at=datetime.now(timezone.utc),
+        triggered_by="manual",
+        sync_scope="Linear PR relink",
+        current_step="relinking",
+    )
+    db.add(sync_event)
+    await db.commit()
+    await db.refresh(sync_event)
+
+    try:
+        new_links = await link_prs_to_external_issues(db, integration_id)
+        sync_event.status = "completed"
+        sync_event.completed_at = datetime.now(timezone.utc)
+        started = sync_event.started_at
+        if started:
+            # Normalize to tz-aware for SQLite (tests) and Postgres parity
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            sync_event.duration_s = int(
+                (sync_event.completed_at - started).total_seconds()
+            )
+        _add_log(sync_event, "info", f"Relinked PRs — {new_links} new link rows")
+        await db.commit()
+    except Exception as e:
+        sync_event.status = "failed"
+        sync_event.completed_at = datetime.now(timezone.utc)
+        _add_log(sync_event, "error", f"Relink failed: {str(e)[:180]}")
+        await db.commit()
+        raise
+
+    return sync_event
 
 
 # --- Developer auto-mapping ---
@@ -1174,18 +2226,50 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return None
 
 
-async def _resolve_developer_by_email(db: AsyncSession, email: str | None) -> int | None:
-    """Look up a developer by email, return their ID or None."""
+async def _resolve_developer_by_email(
+    db: AsyncSession,
+    email: str | None,
+    cache: dict[str, int | None] | None = None,
+) -> int | None:
+    """Look up a developer by email, return their ID or None.
+
+    Accepts an optional ``cache`` dict (keyed by lowercased email) to amortize
+    the per-call SELECT over a full sync run. On cache miss we populate the
+    dict so subsequent lookups for the same email stay in-memory. Nothing is
+    ever evicted — the cache's lifetime is one sync run, not a singleton.
+    """
     if not email:
         return None
+    key = email.lower()
+    if cache is not None and key in cache:
+        return cache[key]
     result = await db.execute(
         select(Developer.id).where(
-            func.lower(Developer.email) == email.lower(),
+            func.lower(Developer.email) == key,
             Developer.is_active.is_(True),
         )
     )
     row = result.first()
-    return row[0] if row else None
+    dev_id = row[0] if row else None
+    if cache is not None:
+        cache[key] = dev_id
+    return dev_id
+
+
+async def _build_email_cache(db: AsyncSession) -> dict[str, int | None]:
+    """Preload active developers into an email→id dict for a sync run.
+
+    Caller passes the returned dict to persist helpers to skip per-row
+    SELECTs (Phase 01 observed ~6000 SELECTs for a 588-issue full sync).
+    """
+    result = await db.execute(
+        select(Developer.email, Developer.id).where(Developer.is_active.is_(True))
+    )
+    cache: dict[str, int | None] = {}
+    for email, dev_id in result.all():
+        if email:
+            cache[email.lower()] = dev_id
+    return cache
 
 
 async def _resolve_external_project(db: AsyncSession, external_id: str) -> int | None:

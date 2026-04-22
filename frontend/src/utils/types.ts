@@ -802,11 +802,13 @@ export interface FlakyCheck {
   name: string
   failure_rate: number
   total_runs: number
+  html_url?: string | null
 }
 
 export interface SlowestCheck {
   name: string
   avg_duration_s: number
+  html_url?: string | null
 }
 
 export interface CIStatsResponse {
@@ -1470,4 +1472,428 @@ export interface VersionInfo {
   commit: string
   deployed_at: string
   full_version: string
+}
+
+// --- Linear Insights v2 ---
+
+// Phase 02 — Linkage Quality
+
+export interface LinkQualityUnlinkedPR {
+  pr_id: number
+  number: number
+  title: string
+  created_at: string | null
+  html_url: string | null
+  author_github_username: string | null
+  repo: string
+}
+
+export interface LinkQualityDisagreementLink {
+  external_issue_id: number
+  identifier: string
+  link_source: string
+  link_confidence: string
+}
+
+export interface LinkQualityDisagreementPR {
+  pr_id: number
+  number: number
+  title: string
+  html_url: string | null
+  repo: string
+  links: LinkQualityDisagreementLink[]
+}
+
+export interface LinkQualitySummary {
+  total_prs: number
+  linked_prs: number
+  linkage_rate: number
+  by_confidence: Record<string, number>
+  by_source: Record<string, number>
+  unlinked_recent: LinkQualityUnlinkedPR[]
+  disagreement_prs: LinkQualityDisagreementPR[]
+}
+
+export interface RelinkResponse {
+  sync_event_id: number
+  status: string
+  new_links?: number | null
+}
+
+export interface LinkageRateTrendBucket {
+  week_start: string
+  total: number
+  linked: number
+  linkage_rate: number | null
+}
+
+export interface LinkageRateTrendResponse {
+  buckets: LinkageRateTrendBucket[]
+}
+
+// Phase 10 — DORA v2
+
+export interface DoraV2Throughput {
+  deployment_frequency: number | null
+  lead_time_hours: number | null
+  mttr_hours: number | null
+}
+
+export interface DoraV2Stability {
+  change_failure_rate: number | null
+  rework_rate: number | null
+}
+
+export interface DoraV2Bands {
+  deployment_frequency: string
+  lead_time: string
+  mttr: string
+  change_failure_rate: string
+  rework_rate: string
+  overall: string
+}
+
+export interface DoraV2CohortRow {
+  merges: number
+  rework_rate: number
+  share_pct: number
+}
+
+export interface DoraV2Response {
+  throughput: DoraV2Throughput
+  stability: DoraV2Stability
+  bands: DoraV2Bands
+  cohorts: Record<string, DoraV2CohortRow>
+  date_from: string
+  date_to: string
+}
+
+// Phase 03 — Linear Usage Health
+
+export type LinearHealthStatus = 'healthy' | 'warning' | 'critical'
+
+export interface LinearHealthAdoption {
+  linked_pr_count: number
+  total_pr_count: number
+  linkage_rate: number
+  target: number
+  status: LinearHealthStatus
+}
+
+export interface LinearHealthSpecQuality {
+  median_description_length: number
+  median_comments_before_first_pr: number
+  high_comment_issue_pct: number
+  status: LinearHealthStatus
+}
+
+export interface LinearHealthAutonomy {
+  self_picked_count: number
+  pushed_count: number
+  self_picked_pct: number
+  median_time_to_assign_s: number | null
+  status: LinearHealthStatus
+}
+
+export interface LinearHealthDialogue {
+  median_comments_per_issue: number
+  p90_comments_per_issue: number
+  silent_issue_pct: number
+  distribution_shape: string
+  status: LinearHealthStatus
+}
+
+export interface LinearHealthCreatorRow {
+  developer_id: number
+  developer_name: string
+  issues_created: number
+  avg_comments_on_their_issues: number
+  avg_downstream_pr_review_rounds: number
+  sample_size: number
+}
+
+export interface LinearHealthCreatorOutcome {
+  top_creators: LinearHealthCreatorRow[]
+}
+
+export interface LinearUsageHealthResponse {
+  adoption: LinearHealthAdoption
+  spec_quality: LinearHealthSpecQuality
+  autonomy: LinearHealthAutonomy
+  dialogue_health: LinearHealthDialogue
+  creator_outcome: LinearHealthCreatorOutcome
+}
+
+// Phase 04 — Issue Conversations
+
+export interface ChattyIssueRef {
+  id: number
+  name: string | null
+}
+
+export interface ChattyIssueLinkedPR {
+  pr_id: number
+  number: number
+  repo: string | null
+  review_round_count: number | null
+  merged_at: string | null
+}
+
+export interface ChattyIssueRow {
+  issue_id: number
+  identifier: string
+  title: string
+  url: string | null
+  creator: ChattyIssueRef | null
+  assignee: ChattyIssueRef | null
+  project: ChattyIssueRef | null
+  priority_label: string | null
+  estimate: number | null
+  comment_count: number
+  unique_participants: number
+  first_response_s: number | null
+  created_at: string | null
+  status: string | null
+  linked_prs: ChattyIssueLinkedPR[]
+  avg_linked_pr_review_rounds: number | null
+}
+
+export interface ConversationsScatterPoint {
+  comment_count: number
+  review_rounds: number
+  issue_identifier: string
+  pr_number: number
+}
+
+export interface FirstResponseHistogramBucket {
+  bucket: string
+  count: number
+}
+
+export interface ParticipantDistributionBucket {
+  participants: string
+  count: number
+}
+
+// Phase 05 — Developer Linear profiles
+
+export interface LabelCountRow {
+  label: string
+  count: number
+}
+
+export interface LinearCreatorProfile {
+  issues_created: number
+  issues_created_by_type: Record<string, number>
+  top_labels: LabelCountRow[]
+  avg_description_length: number
+  avg_comments_generated: number
+  avg_downstream_pr_review_rounds: number
+  sample_size_downstream_prs: number
+  self_assigned_pct: number
+  median_time_to_close_for_their_issues_s: number | null
+}
+
+export interface LinearWorkerProfile {
+  issues_worked: number
+  self_picked_count: number
+  pushed_count: number
+  self_picked_pct: number
+  median_triage_to_start_s: number | null
+  median_cycle_time_s: number | null
+  issues_worked_by_status: Record<string, number>
+  reassigned_to_other_count: number
+}
+
+export interface ShepherdCollaborator {
+  developer_id: number
+  name: string
+  count: number
+}
+
+export interface LinearShepherdProfile {
+  comments_on_others_issues: number
+  issues_commented_on: number
+  unique_teams_commented_on: number
+  is_shepherd: boolean
+  top_collaborators: ShepherdCollaborator[]
+}
+
+// Phase 06 — Flow Analytics
+
+export interface FlowReadinessResponse {
+  ready: boolean
+  days_of_history: number
+  issues_with_history: number
+  threshold_days: number
+  threshold_issues: number
+}
+
+export interface StatusTimeDistribution {
+  status_category: string
+  p50_s: number
+  p75_s: number
+  p90_s: number
+  p95_s: number
+  sample_size: number
+}
+
+export interface StatusRegression {
+  issue_id: number
+  identifier: string
+  title: string
+  url: string | null
+  from_status: string
+  to_status: string
+  changed_at: string | null
+  actor_id: number | null
+  actor_name: string | null
+}
+
+export interface TriageBounce {
+  issue_id: number
+  identifier: string
+  title: string
+  url: string | null
+}
+
+export interface RefinementChurnDistribution {
+  p50: number
+  p90: number
+  mean: number
+  total_issues_with_churn: number
+}
+
+export interface RefinementChurnRow {
+  issue_id: number
+  identifier: string
+  title: string
+  url: string | null
+  churn_events: number
+}
+
+export interface RefinementChurnResponse {
+  distribution: RefinementChurnDistribution
+  top: RefinementChurnRow[]
+}
+
+// Phase 07 — Bottleneck intelligence
+
+export interface CumulativeFlowPoint {
+  date: string
+  triage: number
+  backlog: number
+  todo: number
+  in_progress: number
+  in_review: number
+  done: number
+  cancelled: number
+}
+
+export interface WipIssueRef {
+  id: number
+  identifier: string
+  title: string
+}
+
+export interface WipOverLimit {
+  developer_id: number
+  developer_name: string
+  in_progress_count: number
+  threshold: number
+  issues: WipIssueRef[]
+}
+
+export interface ReviewLoadTopRow {
+  reviewer_id: number
+  reviewer_name: string
+  review_count: number
+}
+
+export interface ReviewLoadGini {
+  gini: number
+  total_reviews: number
+  total_reviewers: number
+  top_k_share: number
+  top_reviewers: ReviewLoadTopRow[]
+}
+
+export interface ReviewNetworkNode {
+  id: number
+  name: string
+  team: string | null
+}
+
+export interface ReviewNetworkEdge {
+  reviewer_id: number
+  author_id: number
+  weight: number
+}
+
+export interface ReviewNetworkResponse {
+  nodes: ReviewNetworkNode[]
+  edges: ReviewNetworkEdge[]
+}
+
+export interface CrossTeamHandoff {
+  issue_id: number
+  identifier: string | null
+  title: string | null
+  from_team: string | null
+  to_team: string | null
+  changed_at: string | null
+}
+
+export interface BlockedChainRow {
+  issue_id: number
+  identifier: string
+  title: string
+  status: string | null
+  blocker_depth: number
+}
+
+export interface ReviewPingPongRow {
+  pr_id: number
+  number: number
+  title: string
+  review_round_count: number
+  author_id: number | null
+  state: string
+  html_url: string | null
+  repo: string | null
+}
+
+export interface BusFactorFileRow {
+  filename: string
+  distinct_authors: number
+  owner_name: string | null
+}
+
+export interface BimodalPeak {
+  bin: number
+  count: number
+}
+
+export interface BimodalAnalysis {
+  is_bimodal: boolean
+  peaks: BimodalPeak[]
+  trough_ratio: number | null
+  bins: number[] | null
+  bucket_size: number | null
+  min: number | null
+  max: number | null
+}
+
+export interface CycleTimeHistogramResponse {
+  sample_size: number
+  p50_s: number
+  p90_s: number
+  bimodal_analysis: BimodalAnalysis
+}
+
+export interface BottleneckDigestItem {
+  title: string
+  severity: string
+  detail: string
+  drill_path: string
 }

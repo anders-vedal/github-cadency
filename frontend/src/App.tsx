@@ -8,6 +8,7 @@ import { AuthContext, useAuthProvider } from '@/hooks/useAuth'
 import { useIntegrations } from '@/hooks/useIntegrations'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import Layout from '@/components/Layout'
+import MetricsUsageBanner from '@/components/MetricsUsageBanner'
 import SidebarLayout from '@/components/SidebarLayout'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import Login from '@/pages/Login'
@@ -46,6 +47,12 @@ const AboutPage = lazy(() => import('@/pages/settings/About'))
 const SprintDashboard = lazy(() => import('@/pages/insights/SprintDashboard'))
 const PlanningInsights = lazy(() => import('@/pages/insights/PlanningInsights'))
 const ProjectPortfolio = lazy(() => import('@/pages/insights/ProjectPortfolio'))
+const IssueConversations = lazy(() => import('@/pages/insights/IssueConversations'))
+const FlowAnalytics = lazy(() => import('@/pages/insights/FlowAnalytics'))
+const Bottlenecks = lazy(() => import('@/pages/insights/Bottlenecks'))
+const LinkageQuality = lazy(() => import('@/pages/admin/LinkageQuality'))
+const MetricsGovernance = lazy(() => import('@/pages/admin/MetricsGovernance'))
+const ClassifierRules = lazy(() => import('@/pages/admin/ClassifierRules'))
 
 function PageSkeleton() {
   return (
@@ -73,6 +80,9 @@ const linearInsightsSidebarItems: SidebarItem[] = [
   { to: '/insights/sprints', label: 'Sprints' },
   { to: '/insights/planning', label: 'Planning' },
   { to: '/insights/projects', label: 'Projects' },
+  { to: '/insights/conversations', label: 'Conversations' },
+  { to: '/insights/flow', label: 'Flow Analytics' },
+  { to: '/insights/bottlenecks', label: 'Bottlenecks' },
 ]
 
 const setupLinearSidebarItem: SidebarItem = { to: '/admin/integrations', label: 'Sprint Planning ›' }
@@ -86,6 +96,9 @@ const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/slack', label: 'Slack' },
   { to: '/admin/work-categories', label: 'Work Categories' },
   { to: '/admin/integrations', label: 'Integrations' },
+  { to: '/admin/linkage-quality', label: 'Linkage Quality' },
+  { to: '/admin/metrics-governance', label: 'Metrics Governance' },
+  { to: '/admin/classifier-rules', label: 'Classifier Rules' },
   { to: '/admin/notifications', label: 'Notifications' },
   { to: '/admin/about', label: 'About' },
 ]
@@ -158,6 +171,7 @@ function AppRoutes() {
                         auth.isAdmin ? (
                           <SidebarLayout items={insightsSidebarItems} title="Insights">
                             <ErrorBoundary>
+                              <MetricsUsageBanner className="mb-4" />
                               <Routes>
                                 <Route path="/workload" element={<WorkloadOverview />} />
                                 <Route path="/collaboration" element={<CollaborationMatrix />} />
@@ -174,6 +188,9 @@ function AppRoutes() {
                                 <Route path="/sprints" element={<SprintDashboard />} />
                                 <Route path="/planning" element={<PlanningInsights />} />
                                 <Route path="/projects" element={<ProjectPortfolio />} />
+                                <Route path="/conversations" element={<IssueConversations />} />
+                                <Route path="/flow" element={<FlowAnalytics />} />
+                                <Route path="/bottlenecks" element={<Bottlenecks />} />
                                 <Route path="*" element={<Navigate to="/insights/workload" replace />} />
                               </Routes>
                             </ErrorBoundary>
@@ -197,6 +214,9 @@ function AppRoutes() {
                                 <Route path="/slack" element={<SlackSettingsPage />} />
                                 <Route path="/work-categories" element={<WorkCategoriesPage />} />
                                 <Route path="/integrations" element={<IntegrationSettings />} />
+                                <Route path="/linkage-quality" element={<LinkageQuality />} />
+                                <Route path="/metrics-governance" element={<MetricsGovernance />} />
+                                <Route path="/classifier-rules" element={<ClassifierRules />} />
                                 <Route path="/notifications" element={<NotificationSettings />} />
                                 <Route path="/about" element={<AboutPage />} />
                                 <Route path="*" element={<Navigate to="/admin/team" replace />} />
