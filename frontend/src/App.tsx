@@ -13,7 +13,7 @@ import SidebarLayout from '@/components/SidebarLayout'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
-import type { SidebarItem } from '@/components/SidebarLayout'
+import type { SidebarItem, SidebarGroup } from '@/components/SidebarLayout'
 
 // Lazy-loaded page components
 const Dashboard = lazy(() => import('@/pages/Dashboard'))
@@ -62,30 +62,6 @@ function PageSkeleton() {
     </div>
   )
 }
-
-const baseInsightsSidebarItems: SidebarItem[] = [
-  { to: '/insights/workload', label: 'Workload' },
-  { to: '/insights/collaboration', label: 'Collaboration' },
-  { to: '/insights/benchmarks', label: 'Benchmarks' },
-  { to: '/insights/issue-quality', label: 'Issue Quality' },
-  { to: '/insights/issue-linkage', label: 'Issue Linkage' },
-  { to: '/insights/code-churn', label: 'Code Churn' },
-  { to: '/insights/cicd', label: 'CI/CD' },
-  { to: '/insights/dora', label: 'DORA Metrics' },
-  { to: '/insights/investment', label: 'Investment' },
-  { to: '/insights/org-chart', label: 'Org Chart' },
-]
-
-const linearInsightsSidebarItems: SidebarItem[] = [
-  { to: '/insights/sprints', label: 'Sprints' },
-  { to: '/insights/planning', label: 'Planning' },
-  { to: '/insights/projects', label: 'Projects' },
-  { to: '/insights/conversations', label: 'Conversations' },
-  { to: '/insights/flow', label: 'Flow Analytics' },
-  { to: '/insights/bottlenecks', label: 'Bottlenecks' },
-]
-
-const setupLinearSidebarItem: SidebarItem = { to: '/admin/integrations', label: 'Sprint Planning ›' }
 
 const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/team', label: 'Team' },
@@ -136,14 +112,51 @@ function AppRoutes() {
   const { data: integrations } = useIntegrations()
   const hasLinear = integrations?.some((i) => i.type === 'linear' && i.status === 'active')
 
-  const insightsSidebarItems = useMemo(() => {
-    const items = [...baseInsightsSidebarItems]
+  const insightsSidebarGroups = useMemo<SidebarGroup[]>(() => {
+    const issuesItems: SidebarItem[] = [
+      { to: '/insights/issue-quality', label: 'Issue Quality' },
+      { to: '/insights/issue-linkage', label: 'Issue Linkage' },
+    ]
     if (hasLinear) {
-      items.push(...linearInsightsSidebarItems)
-    } else {
-      items.push(setupLinearSidebarItem)
+      issuesItems.push({ to: '/insights/conversations', label: 'Conversations' })
     }
-    return items
+    const planningGroup: SidebarGroup = hasLinear
+      ? {
+          label: 'Planning',
+          items: [
+            { to: '/insights/sprints', label: 'Sprints' },
+            { to: '/insights/planning', label: 'Planning Health' },
+            { to: '/insights/projects', label: 'Projects' },
+            { to: '/insights/flow', label: 'Flow Analytics' },
+            { to: '/insights/bottlenecks', label: 'Bottlenecks' },
+          ],
+        }
+      : {
+          label: 'Planning',
+          items: [{ to: '/admin/integrations', label: 'Sprint Planning ›' }],
+        }
+    return [
+      {
+        label: 'People',
+        items: [
+          { to: '/insights/workload', label: 'Workload' },
+          { to: '/insights/collaboration', label: 'Collaboration' },
+          { to: '/insights/benchmarks', label: 'Benchmarks' },
+          { to: '/insights/org-chart', label: 'Org Chart' },
+        ],
+      },
+      {
+        label: 'Delivery',
+        items: [
+          { to: '/insights/dora', label: 'DORA Metrics' },
+          { to: '/insights/cicd', label: 'CI/CD' },
+          { to: '/insights/code-churn', label: 'Code Churn' },
+          { to: '/insights/investment', label: 'Investment' },
+        ],
+      },
+      { label: 'Issues', items: issuesItems },
+      planningGroup,
+    ]
   }, [hasLinear])
 
   return (
@@ -169,7 +182,7 @@ function AppRoutes() {
                       {/* Insights — sidebar layout */}
                       <Route path="/insights/*" element={
                         auth.isAdmin ? (
-                          <SidebarLayout items={insightsSidebarItems} title="Insights">
+                          <SidebarLayout groups={insightsSidebarGroups} title="Insights">
                             <ErrorBoundary>
                               <MetricsUsageBanner className="mb-4" />
                               <Routes>

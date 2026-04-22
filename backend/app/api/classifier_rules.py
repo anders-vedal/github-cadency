@@ -82,15 +82,18 @@ async def patch_classifier_rule(
     body: ClassifierRulePatch,
     db: AsyncSession = Depends(get_db),
 ):
-    row = await update_rule(
-        db,
-        rule_id,
-        pattern=body.pattern,
-        is_hotfix=body.is_hotfix,
-        is_incident=body.is_incident,
-        priority=body.priority,
-        enabled=body.enabled,
-    )
+    try:
+        row = await update_rule(
+            db,
+            rule_id,
+            pattern=body.pattern,
+            is_hotfix=body.is_hotfix,
+            is_incident=body.is_incident,
+            priority=body.priority,
+            enabled=body.enabled,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if row is None:
         raise HTTPException(status_code=404, detail="Rule not found")
     return rule_to_dict(row)

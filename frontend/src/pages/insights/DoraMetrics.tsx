@@ -8,6 +8,7 @@ import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
+import AiCohortBadge from '@/components/AiCohortBadge'
 import DeploymentTimeline from '@/components/charts/DeploymentTimeline'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -174,9 +175,7 @@ export default function DoraMetrics() {
       </div>
       {aiSharePct != null && aiSharePct > 0 && cohort === 'all' && (
         <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2.5 text-xs">
-          <Badge variant="outline" className="text-[11px]">
-            {aiSharePct}% AI-touched
-          </Badge>
+          <AiCohortBadge aiSharePct={aiSharePct} variant="short" />
           <span className="text-muted-foreground">
             AI-reviewed and AI-authored PRs are blended into these numbers. Switch
             cohorts above or see the comparison below.

@@ -1090,12 +1090,35 @@ class FlakyCheck(BaseModel):
     failure_rate: float
     total_runs: int
     html_url: str | None = None
+    category: Literal["broken", "flaky"] = "flaky"
+    last_run_at: datetime | None = None
+    failure_rate_first_half: float | None = None
+    failure_rate_second_half: float | None = None
+    trend: Literal["rising", "falling", "stable"] | None = None
 
 
 class SlowestCheck(BaseModel):
     name: str
     avg_duration_s: float
     html_url: str | None = None
+
+
+class CICheckFailureEntry(BaseModel):
+    pr_number: int
+    pr_title: str
+    pr_html_url: str | None = None
+    repo_full_name: str
+    author_login: str | None = None
+    author_avatar_url: str | None = None
+    failed_at: datetime
+    run_html_url: str | None = None
+    run_attempt: int
+    was_eventually_green: bool
+
+
+class CICheckFailuresResponse(BaseModel):
+    check_name: str
+    entries: list[CICheckFailureEntry]
 
 
 class CIStatsResponse(BaseModel):

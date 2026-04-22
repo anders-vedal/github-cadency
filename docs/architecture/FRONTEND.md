@@ -1,6 +1,6 @@
 ---
 purpose: "Routing, component hierarchy, state management, hooks, design system, error/loading patterns"
-last-updated: "2026-04-22"
+last-updated: "2026-04-22 (post linear-insights-v2-fixes)"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -28,14 +28,14 @@ All routes defined in `frontend/src/App.tsx`.
 | `/insights/issue-quality` | `IssueQuality` | Admin | SidebarLayout |
 | `/insights/issue-linkage` | `IssueLinkage` | Admin | SidebarLayout | Per-developer PR-to-issue linkage rates, attention callout, sortable table with rate bars |
 | `/insights/code-churn` | `CodeChurn` | Admin | SidebarLayout |
-| `/insights/cicd` | `CIInsights` | Admin | SidebarLayout |
+| `/insights/cicd` | `CIInsights` | Admin | SidebarLayout | "CI Check Health" card splits Broken (≥90% failure) / Flaky (10–90%) sections with per-row trend arrow + Last Seen column, stale filter toggle, row-click opens modal listing failing PRs with was-eventually-green status |
 | `/insights/dora` | `DORAMetrics` | Admin | SidebarLayout |
 | `/insights/investment` | `Investment` | Admin | SidebarLayout | Clickable donut charts, inline category preview, custom tooltips |
 | `/insights/investment/:category` | `InvestmentCategory` | Admin | SidebarLayout | Paginated item table with recategorization dropdowns |
 | `/insights/org-chart` | `OrgChart` | Admin | SidebarLayout |
-| `/insights/conversations` | `IssueConversations` | Any | SidebarLayout | Phase 04 — chattiest issues + comment↔bounce scatter + first-response histogram. Linear-primary gate. |
-| `/insights/flow` | `FlowAnalytics` | Any | SidebarLayout | Phase 06 — status-time distribution, regressions, triage bounces, churn. Readiness-gated (14d + 100 issues). |
-| `/insights/bottlenecks` | `Bottlenecks` | Any | SidebarLayout | Phase 07 — CFD, WIP, review Gini, silos, blocked chains, ping-pong, bus factor, bimodal detection. |
+| `/insights/conversations` | `IssueConversations` | Any | SidebarLayout | Phase 04 — chattiest issues + comment↔bounce scatter + first-response histogram. All sub-queries pass `{ enabled: !!hasLinear }` to TanStack Query — zero Linear-scoped requests on non-Linear installs. |
+| `/insights/flow` | `FlowAnalytics` | Any | SidebarLayout | Phase 06 — status-time distribution (rendered as per-state `DistributionStatCard` grid with p50/p90 + volatility badge), regressions, triage bounces, churn. Readiness-gated (14d + 100 issues). Sub-queries gated via `{ enabled: !!hasLinear }`. |
+| `/insights/bottlenecks` | `Bottlenecks` | Any | SidebarLayout | Phase 07 — CFD, WIP, review Gini, silos, blocked chains, ping-pong, bus factor, bimodal cycle-time (rendered via `DistributionStatCard`). Sub-queries gated via `{ enabled: !!hasLinear }`. |
 | `/admin/linkage-quality` | `LinkageQuality` | Admin | SidebarLayout | Phase 02 — confidence donut + source breakdown + unlinked PRs + disagreement list + rerun linker button. |
 | `/admin/repos` | `Repos` | Admin | SidebarLayout | Summary strip, search/filter/sort, table/card toggle, health indicators, deep links to insights |
 | `/admin/sync` | `SyncPage` | Admin | SidebarLayout |
@@ -154,6 +154,7 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useWorkAllocationItems(cat, type, from, to, page, size)` | `GET /stats/work-allocation/items` | `['work-allocation-items', ...]` |
 | `useRecategorizeItem()` | `PATCH /stats/work-allocation/items/:type/:id/category` | Mutation; invalidates `work-allocation` + `work-allocation-items` |
 | `useCIStats(from, to, repoId)` | `GET /stats/ci` | `['ci-stats', ...]` |
+| `useCheckFailures(checkName, from, to, repoId)` | `GET /stats/ci/check-failures` | `['ci-check-failures', ...]`; `enabled` only when `checkName` is set |
 | `useDoraMetrics(from, to, repoId)` | `GET /stats/dora` | `['dora-metrics', ...]` |
 | `useAllDeveloperStats(ids, from, to)` | Parallel `GET /stats/developer/:id` | Shared with `useDeveloperStats` |
 | `useReposSummary(from, to)` | `GET /stats/repos/summary` | `['repos-summary', ...]`, staleTime 60s |
@@ -295,10 +296,10 @@ Added by Phases 02-07. All respect `DateRangeContext` and include date params in
 |------|-------|-----------|-------|
 | `useLinkageQuality.ts` | `useLinkageQuality(id)`, `useRelink()` | `GET /integrations/:id/linkage-quality`, `POST /integrations/:id/relink` | Phase 02. Admin-only. |
 | `useLinearUsageHealth.ts` | `useLinearUsageHealth(from, to)` | `GET /linear/usage-health` | Phase 03. 5-min staleTime. Treats 409 as "hide card, not error" — returns null rather than throwing. |
-| `useConversations.ts` | `useChattiestIssues(filters)`, `useCommentBounceScatter(from, to)`, `useFirstResponseHistogram(from, to)`, `useParticipantDistribution(from, to)` | `GET /conversations/*` | Phase 04. |
+| `useConversations.ts` | `useChattiestIssues(filters, { enabled })`, `useCommentBounceScatter(from, to, { enabled })`, `useFirstResponseHistogram(from, to, { enabled })`, `useParticipantDistribution(from, to, { enabled })` | `GET /conversations/*` | Phase 04. All accept `{ enabled?: boolean }` — pages pass `!!hasLinear` so non-Linear installs don't fire network requests. |
 | `useDeveloperLinear.ts` | `useDeveloperLinearCreator(id, from, to)`, `useDeveloperLinearWorker(id, from, to)`, `useDeveloperLinearShepherd(id, from, to)` | `GET /developers/:id/linear-{creator,worker,shepherd}-profile` | Phase 05. `enabled: hasLinear && isPrimary`. API returns 403 for cross-user access. |
-| `useFlowAnalytics.ts` | `useFlowReadiness()`, `useStatusTimeDistribution()`, `useStatusRegressions()`, `useTriageBounces()`, `useRefinementChurn()` | `GET /flow/*` | Phase 06. |
-| `useBottlenecks.ts` | `useBottleneckSummary()`, `useCumulativeFlow()`, `useWip()`, `useReviewLoad()`, `useReviewNetwork()`, `useCrossTeamHandoffs()`, `useBlockedChains()`, `useReviewPingPong()`, `useBusFactorFiles()`, `useCycleHistogram()` | `GET /bottlenecks/*` | Phase 07. 10 hooks. |
+| `useFlowAnalytics.ts` | `useFlowReadiness()`, `useStatusTimeDistribution()`, `useStatusRegressions()`, `useTriageBounces()`, `useRefinementChurn()` | `GET /flow/*` | Phase 06. Every hook accepts a trailing `{ enabled?: boolean }` options bag forwarded to TanStack. |
+| `useBottlenecks.ts` | `useBottleneckSummary()`, `useCumulativeFlow()`, `useWip()`, `useReviewLoad()`, `useReviewNetwork()`, `useCrossTeamHandoffs()`, `useBlockedChains()`, `useReviewPingPong()`, `useBusFactorFiles()`, `useCycleHistogram()` | `GET /bottlenecks/*` | Phase 07. 10 hooks, all `{ enabled?: boolean }`-gated. |
 
 Linear Insights v2 components:
 
@@ -353,6 +354,17 @@ All Recharts 3 with `ResponsiveContainer`:
 ### Toast Notifications
 
 `sonner` library, bottom-right, 4s auto-dismiss. All mutations wrapped with success/error toasts.
+
+### Metrics governance components (`components/`)
+
+Shared primitives that enforce Phase 11 governance rules on every metric surface:
+
+| Component | File | Role |
+|-----------|------|------|
+| `MetricsUsageBanner` | `components/MetricsUsageBanner.tsx` | Quarterly-dismissable banner explaining "metrics are for self-reflection, not performance reviews". Rendered at the top of every metric-surface route — `Dashboard`, `ExecutiveDashboard`, all `/insights/*` (via SidebarLayout wrapper in `App.tsx`), `/admin/linkage-quality`, `/admin/metrics-governance`, `/admin/classifier-rules`. Dismiss state stored in localStorage so multi-site rendering doesn't duplicate the notice. |
+| `DistributionStatCard` | `components/DistributionStatCard.tsx` | Replaces bare averages with `p50 + p90 + optional histogram + shape label`. Use wherever the backend returns distribution data. Wired on `FlowAnalytics` (per-state time distribution) and `Bottlenecks` (cycle-time histogram). |
+| `AiCohortBadge` | `components/AiCohortBadge.tsx` | Disclosure chip showing "X% AI-touched in range" with a drill-down tooltip + link. Rendered on `DoraMetrics` when any cohort's share > 0. |
+| `StatCard` (`pairedOutcome` slot) | `components/StatCard.tsx` | Activity metrics (PR count, review count, etc.) must pass `pairedOutcome={{ label, value, tooltip }}` so throughput can't be read in isolation from quality. Wired on Dashboard "Total PRs" (→ merge rate) + "Total Reviews" (→ time to first review), and DeveloperDetail "PRs Opened" (→ merge rate). |
 
 ## Error / Loading Patterns
 

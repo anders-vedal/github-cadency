@@ -106,10 +106,16 @@ export default function IssueConversations() {
     isLoading: chattiestLoading,
     isError: chattiestError,
     refetch: refetchChattiest,
-  } = useChattiestIssues(filters)
-  const { data: scatter } = useCommentBounceScatter(dateFrom, dateTo)
-  const { data: firstResponse } = useFirstResponseHistogram(dateFrom, dateTo)
-  const { data: participants } = useParticipantDistribution(dateFrom, dateTo)
+  } = useChattiestIssues(filters, { enabled: !!hasLinear })
+  const { data: scatter } = useCommentBounceScatter(dateFrom, dateTo, {
+    enabled: !!hasLinear,
+  })
+  const { data: firstResponse } = useFirstResponseHistogram(dateFrom, dateTo, {
+    enabled: !!hasLinear,
+  })
+  const { data: participants } = useParticipantDistribution(dateFrom, dateTo, {
+    enabled: !!hasLinear,
+  })
 
   // Summary stats derived from chattiest (note: in theory, we'd want these aggregated
   // server-side; the top-20 sample is a reasonable proxy for now)

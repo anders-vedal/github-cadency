@@ -7,7 +7,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import Developer, PRCheckRun, PullRequest, Repository
-from app.services.stats import get_ci_stats
+from app.services.stats import get_check_failure_details, get_ci_stats
 
 
 NOW = datetime.now(timezone.utc)
@@ -202,6 +202,7 @@ async def test_flaky_check_detection(
             check_name="flaky-test",
             conclusion="failure" if i < 2 else "success",
             run_attempt=1,
+            started_at=ONE_WEEK_AGO + timedelta(hours=i),
             duration_s=60,
         ))
 
@@ -212,6 +213,130 @@ async def test_flaky_check_detection(
     assert result.flaky_checks[0].name == "flaky-test"
     assert abs(result.flaky_checks[0].failure_rate - 0.333) < 0.01
     assert result.flaky_checks[0].total_runs == 6
+    assert result.flaky_checks[0].category == "flaky"
+    # last_run_at should be the most recent started_at (i=5 → ONE_WEEK_AGO + 5h).
+    # aiosqlite may return naive datetimes, so compare via .replace(tzinfo=None).
+    assert result.flaky_checks[0].last_run_at is not None
+    expected_last = (ONE_WEEK_AGO + timedelta(hours=5)).replace(tzinfo=None)
+    actual_last = result.flaky_checks[0].last_run_at.replace(tzinfo=None)
+    assert abs((actual_last - expected_last).total_seconds()) < 1
+
+
+@pytest.mark.asyncio
+async def test_last_run_at_reflects_stale_check(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """A check whose latest run is 30 days old should surface that last_run_at."""
+    stale_start = NOW - timedelta(days=30)
+    for i in range(6):
+        pr = PullRequest(
+            github_id=11000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=600 + i,
+            title=f"Stale PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=stale_start + timedelta(minutes=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="stale-check",
+            conclusion="failure" if i < 3 else "success",
+            run_attempt=1,
+            started_at=stale_start + timedelta(minutes=i),
+            duration_s=30,
+        ))
+
+    await db_session.commit()
+
+    result = await get_ci_stats(db_session, NOW - timedelta(days=60), NOW)
+    stale = [c for c in result.flaky_checks if c.name == "stale-check"]
+    assert len(stale) == 1
+    assert stale[0].last_run_at is not None
+    # aiosqlite may return naive datetimes — normalize both sides before subtracting.
+    now_naive = NOW.replace(tzinfo=None)
+    last_naive = stale[0].last_run_at.replace(tzinfo=None)
+    age_days = (now_naive - last_naive).total_seconds() / 86400
+    assert 29 < age_days < 31
+
+
+@pytest.mark.asyncio
+async def test_broken_check_category(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """A check that fails 100% of the time (10 runs) should be categorized as broken."""
+    for i in range(10):
+        pr = PullRequest(
+            github_id=9000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=400 + i,
+            title=f"Broken PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=ONE_WEEK_AGO + timedelta(hours=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="always-fails",
+            conclusion="failure",
+            run_attempt=1,
+            duration_s=30,
+        ))
+
+    await db_session.commit()
+
+    result = await get_ci_stats(db_session, TWO_WEEKS_AGO, NOW)
+    broken = [c for c in result.flaky_checks if c.name == "always-fails"]
+    assert len(broken) == 1
+    assert broken[0].category == "broken"
+    assert broken[0].failure_rate == 1.0
+    assert broken[0].total_runs == 10
+
+
+@pytest.mark.asyncio
+async def test_flaky_check_category_midrange(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """A check at 30% failure rate over 20 runs should be categorized as flaky, not broken."""
+    # 6 failures, 14 successes over 20 runs = 30%
+    for i in range(20):
+        pr = PullRequest(
+            github_id=10000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=500 + i,
+            title=f"Flaky PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=ONE_WEEK_AGO + timedelta(hours=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="sometimes-fails",
+            conclusion="failure" if i < 6 else "success",
+            run_attempt=1,
+            duration_s=30,
+        ))
+
+    await db_session.commit()
+
+    result = await get_ci_stats(db_session, TWO_WEEKS_AGO, NOW)
+    flaky = [c for c in result.flaky_checks if c.name == "sometimes-fails"]
+    assert len(flaky) == 1
+    assert flaky[0].category == "flaky"
+    assert abs(flaky[0].failure_rate - 0.3) < 0.01
+    assert flaky[0].total_runs == 20
 
 
 @pytest.mark.asyncio
@@ -274,3 +399,289 @@ async def test_date_range_filtering(
     # Query last 30 days — should not include the old PR
     result = await get_ci_stats(db_session, NOW - timedelta(days=30), NOW)
     assert result.prs_merged_with_failing_checks == 0
+
+
+@pytest.mark.asyncio
+async def test_trend_falling(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """A check at 80% first half, 20% second half should report trend='falling'."""
+    # 14-day window: midpoint = NOW - 7d.
+    # First-half: 10 PRs at NOW - 12d, 8 failures (80%).
+    # Second-half: 10 PRs at NOW - 2d, 2 failures (20%).
+    for i in range(10):
+        pr = PullRequest(
+            github_id=12000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=700 + i,
+            title=f"First-half PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=NOW - timedelta(days=12, minutes=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="trend-check",
+            conclusion="failure" if i < 8 else "success",
+            run_attempt=1,
+            started_at=NOW - timedelta(days=12, minutes=i),
+            duration_s=60,
+        ))
+
+    for i in range(10):
+        pr = PullRequest(
+            github_id=13000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=800 + i,
+            title=f"Second-half PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=NOW - timedelta(days=2, minutes=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="trend-check",
+            conclusion="failure" if i < 2 else "success",
+            run_attempt=1,
+            started_at=NOW - timedelta(days=2, minutes=i),
+            duration_s=60,
+        ))
+
+    await db_session.commit()
+
+    result = await get_ci_stats(db_session, NOW - timedelta(days=14), NOW)
+    trend_rows = [c for c in result.flaky_checks if c.name == "trend-check"]
+    assert len(trend_rows) == 1
+    row = trend_rows[0]
+    assert row.trend == "falling"
+    assert row.failure_rate_first_half == 0.8
+    assert row.failure_rate_second_half == 0.2
+
+
+@pytest.mark.asyncio
+async def test_trend_insufficient_sample_returns_none(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """If one half has <3 runs the trend should be None (not invented)."""
+    # First half: 5 PRs (3 failures → 60%). Second half: 2 PRs (1 failure → 50%).
+    # Total = 7 runs so ≥5 runs having clause passes; overall failure rate 4/7 ≈ 57%.
+    for i in range(5):
+        pr = PullRequest(
+            github_id=14000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=900 + i,
+            title=f"Early PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=NOW - timedelta(days=12, minutes=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="skinny-trend",
+            conclusion="failure" if i < 3 else "success",
+            run_attempt=1,
+            started_at=NOW - timedelta(days=12, minutes=i),
+            duration_s=60,
+        ))
+
+    for i in range(2):
+        pr = PullRequest(
+            github_id=15000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=1000 + i,
+            title=f"Late PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=NOW - timedelta(days=2, minutes=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="skinny-trend",
+            conclusion="failure" if i < 1 else "success",
+            run_attempt=1,
+            started_at=NOW - timedelta(days=2, minutes=i),
+            duration_s=60,
+        ))
+
+    await db_session.commit()
+
+    result = await get_ci_stats(db_session, NOW - timedelta(days=14), NOW)
+    skinny = [c for c in result.flaky_checks if c.name == "skinny-trend"]
+    assert len(skinny) == 1
+    assert skinny[0].trend is None
+    assert skinny[0].failure_rate_first_half is None
+    assert skinny[0].failure_rate_second_half is None
+
+
+@pytest.mark.asyncio
+async def test_check_failure_details_was_eventually_green(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """Drill-down returns failing PRs with correct was_eventually_green + ordering."""
+    # PR1: failure (attempt 1), success (attempt 2) — eventually_green True
+    pr1 = PullRequest(
+        github_id=20001,
+        repo_id=ci_repo.id,
+        author_id=ci_dev.id,
+        number=2001,
+        title="Fixed after retry",
+        state="closed",
+        is_merged=True,
+        created_at=NOW - timedelta(days=2),
+        html_url="https://github.com/org/ci-repo/pull/2001",
+    )
+    db_session.add(pr1)
+    await db_session.flush()
+    db_session.add(PRCheckRun(
+        pr_id=pr1.id,
+        check_name="drill-target",
+        conclusion="failure",
+        run_attempt=1,
+        started_at=NOW - timedelta(days=2, hours=2),
+        html_url="https://github.com/org/ci-repo/runs/1",
+    ))
+    db_session.add(PRCheckRun(
+        pr_id=pr1.id,
+        check_name="drill-target",
+        conclusion="success",
+        run_attempt=2,
+        started_at=NOW - timedelta(days=2, hours=1),
+    ))
+
+    # PR2: failure only — eventually_green False
+    pr2 = PullRequest(
+        github_id=20002,
+        repo_id=ci_repo.id,
+        author_id=ci_dev.id,
+        number=2002,
+        title="Still broken",
+        state="closed",
+        is_merged=False,
+        created_at=NOW - timedelta(days=1),
+        html_url="https://github.com/org/ci-repo/pull/2002",
+    )
+    db_session.add(pr2)
+    await db_session.flush()
+    db_session.add(PRCheckRun(
+        pr_id=pr2.id,
+        check_name="drill-target",
+        conclusion="failure",
+        run_attempt=1,
+        started_at=NOW - timedelta(days=1, hours=1),
+        html_url="https://github.com/org/ci-repo/runs/2",
+    ))
+
+    await db_session.commit()
+
+    result = await get_check_failure_details(
+        db_session,
+        check_name="drill-target",
+        date_from=NOW - timedelta(days=14),
+        date_to=NOW,
+    )
+    assert result.check_name == "drill-target"
+    assert len(result.entries) == 2
+
+    # Ordering: most recent failure first (PR2 failed 1 day ago, PR1 2 days ago)
+    assert result.entries[0].pr_number == 2002
+    assert result.entries[0].was_eventually_green is False
+    assert result.entries[0].author_login == "ci_dev"
+
+    assert result.entries[1].pr_number == 2001
+    assert result.entries[1].was_eventually_green is True
+    assert result.entries[1].run_html_url == "https://github.com/org/ci-repo/runs/1"
+
+
+@pytest.mark.asyncio
+async def test_check_failure_details_limit(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """The limit parameter should cap the number of entries returned."""
+    for i in range(5):
+        pr = PullRequest(
+            github_id=30000 + i,
+            repo_id=ci_repo.id,
+            author_id=ci_dev.id,
+            number=3000 + i,
+            title=f"Drill PR {i}",
+            state="closed",
+            is_merged=True,
+            created_at=NOW - timedelta(days=1, minutes=i),
+        )
+        db_session.add(pr)
+        await db_session.flush()
+        db_session.add(PRCheckRun(
+            pr_id=pr.id,
+            check_name="drill-limit",
+            conclusion="failure",
+            run_attempt=1,
+            started_at=NOW - timedelta(days=1, minutes=i),
+        ))
+    await db_session.commit()
+
+    result = await get_check_failure_details(
+        db_session,
+        check_name="drill-limit",
+        date_from=NOW - timedelta(days=14),
+        date_to=NOW,
+        limit=2,
+    )
+    assert len(result.entries) == 2
+
+
+@pytest.mark.asyncio
+async def test_check_failure_details_repo_filter(
+    db_session: AsyncSession, ci_repo: Repository, ci_dev: Developer
+):
+    """repo_id param should scope results."""
+    pr = PullRequest(
+        github_id=40001,
+        repo_id=ci_repo.id,
+        author_id=ci_dev.id,
+        number=4001,
+        title="In-repo PR",
+        state="closed",
+        is_merged=True,
+        created_at=NOW - timedelta(days=1),
+    )
+    db_session.add(pr)
+    await db_session.flush()
+    db_session.add(PRCheckRun(
+        pr_id=pr.id,
+        check_name="drill-repo",
+        conclusion="failure",
+        run_attempt=1,
+        started_at=NOW - timedelta(days=1),
+    ))
+    await db_session.commit()
+
+    result = await get_check_failure_details(
+        db_session,
+        check_name="drill-repo",
+        date_from=NOW - timedelta(days=14),
+        date_to=NOW,
+        repo_id=ci_repo.id,
+    )
+    assert len(result.entries) == 1
+
+    # A non-existent repo should yield empty
+    empty = await get_check_failure_details(
+        db_session,
+        check_name="drill-repo",
+        date_from=NOW - timedelta(days=14),
+        date_to=NOW,
+        repo_id=99999,
+    )
+    assert len(empty.entries) == 0

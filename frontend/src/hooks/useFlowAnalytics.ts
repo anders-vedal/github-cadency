@@ -16,11 +16,12 @@ function buildParams(dateFrom?: string, dateTo?: string, extra: Record<string, s
   return p
 }
 
-export function useFlowReadiness() {
+export function useFlowReadiness({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery<FlowReadinessResponse>({
     queryKey: ['flow-readiness'],
     queryFn: () => apiFetch('/flow/readiness'),
     staleTime: 5 * 60_000,
+    enabled,
   })
 }
 
@@ -28,38 +29,55 @@ export function useStatusTimeDistribution(
   dateFrom?: string,
   dateTo?: string,
   groupBy: string = 'all',
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const params = buildParams(dateFrom, dateTo, { group_by: groupBy })
   return useQuery<StatusTimeDistribution[]>({
     queryKey: ['status-time-distribution', dateFrom, dateTo, groupBy],
     queryFn: () => apiFetch(`/flow/status-distribution?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 
-export function useStatusRegressions(dateFrom?: string, dateTo?: string) {
+export function useStatusRegressions(
+  dateFrom?: string,
+  dateTo?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = buildParams(dateFrom, dateTo)
   return useQuery<StatusRegression[]>({
     queryKey: ['status-regressions', dateFrom, dateTo],
     queryFn: () => apiFetch(`/flow/regressions?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 
-export function useTriageBounces(dateFrom?: string, dateTo?: string) {
+export function useTriageBounces(
+  dateFrom?: string,
+  dateTo?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = buildParams(dateFrom, dateTo)
   return useQuery<TriageBounce[]>({
     queryKey: ['triage-bounces', dateFrom, dateTo],
     queryFn: () => apiFetch(`/flow/triage-bounces?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 
-export function useRefinementChurn(dateFrom?: string, dateTo?: string) {
+export function useRefinementChurn(
+  dateFrom?: string,
+  dateTo?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = buildParams(dateFrom, dateTo)
   return useQuery<RefinementChurnResponse>({
     queryKey: ['refinement-churn', dateFrom, dateTo],
     queryFn: () => apiFetch(`/flow/refinement-churn?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }

@@ -36,6 +36,8 @@ from app.schemas.schemas import (
     TopContributor,
     TrendDirection,
     TrendPeriod,
+    CICheckFailureEntry,
+    CICheckFailuresResponse,
     CIStatsResponse,
     CodeChurnResponse,
     DORAMetricsResponse,
@@ -1067,6 +1069,7 @@ async def _compute_per_developer_metrics(
     extended_metrics = [
         "review_quality_score", "changes_requested_rate", "blocker_catch_rate",
         "issues_closed", "prs_merged_bugfix", "issue_linkage_rate",
+        "avg_downstream_pr_review_rounds", "sample_size_downstream_prs",
     ]
     target = set(requested_metrics) if requested_metrics else set(all_base_metrics)
     all_keys = [k for k in all_base_metrics + extended_metrics if k in target]
@@ -1350,6 +1353,47 @@ async def _compute_per_developer_metrics(
             linked = linked_pr_map.get(dev_id, 0)
             linkage_rate_map[dev_id] = round(linked / total, 4) if total > 0 else 0.0
 
+    # Batch 11: Creator ticket-clarity — avg downstream PR review rounds +
+    # sample size (Linear-primary only). Mirrors the logic used in
+    # _get_issue_creator_stats_linear so per-developer benchmark percentiles
+    # line up with the per-creator detail surface.
+    need_downstream = (
+        "avg_downstream_pr_review_rounds" in target
+        or "sample_size_downstream_prs" in target
+    )
+    avg_downstream_map: dict[int, float] = {}
+    sample_size_downstream_map: dict[int, int] = {}
+    if need_downstream:
+        issue_source_b11 = await get_primary_issue_source(db)
+        if issue_source_b11 == "linear":
+            downstream_rows = (await db.execute(
+                select(
+                    ExternalIssue.creator_developer_id,
+                    func.avg(PullRequest.review_round_count),
+                    func.count(PullRequest.id),
+                )
+                .select_from(ExternalIssue)
+                .join(
+                    PRExternalIssueLink,
+                    PRExternalIssueLink.external_issue_id == ExternalIssue.id,
+                )
+                .join(
+                    PullRequest,
+                    PullRequest.id == PRExternalIssueLink.pull_request_id,
+                )
+                .where(
+                    ExternalIssue.creator_developer_id.in_(dev_ids),
+                    ExternalIssue.created_at >= date_from,
+                    ExternalIssue.created_at <= date_to,
+                    PullRequest.review_round_count.isnot(None),
+                )
+                .group_by(ExternalIssue.creator_developer_id)
+            )).all()
+            for dev_id, avg_rounds, sample in downstream_rows:
+                if avg_rounds is not None:
+                    avg_downstream_map[dev_id] = float(avg_rounds)
+                sample_size_downstream_map[dev_id] = int(sample or 0)
+
     # Assemble per-developer metrics in consistent order
     metrics: dict[str, list[float]] = {k: [] for k in all_keys}
 
@@ -1395,6 +1439,14 @@ async def _compute_per_developer_metrics(
             metrics["prs_merged_bugfix"].append(float(bugfix_map.get(dev_id, 0)))
         if "issue_linkage_rate" in target:
             metrics["issue_linkage_rate"].append(linkage_rate_map.get(dev_id, 0.0))
+        if "avg_downstream_pr_review_rounds" in target:
+            metrics["avg_downstream_pr_review_rounds"].append(
+                avg_downstream_map.get(dev_id, 0.0)
+            )
+        if "sample_size_downstream_prs" in target:
+            metrics["sample_size_downstream_prs"].append(
+                float(sample_size_downstream_map.get(dev_id, 0))
+            )
 
     return metrics
 
@@ -3757,6 +3809,19 @@ async def get_ci_stats(
     avg_checks_to_green = round(float(avg_to_green), 2) if avg_to_green else None
 
     # --- Flaky checks (>10% failure rate) ---
+    # Midpoint of the window drives the first-half / second-half trend split.
+    midpoint = date_from + (date_to - date_from) / 2
+    first_half_run = case((PullRequest.created_at < midpoint, 1), else_=0)
+    second_half_run = case((PullRequest.created_at >= midpoint, 1), else_=0)
+    first_half_fail = case(
+        (and_(PullRequest.created_at < midpoint, PRCheckRun.conclusion == "failure"), 1),
+        else_=0,
+    )
+    second_half_fail = case(
+        (and_(PullRequest.created_at >= midpoint, PRCheckRun.conclusion == "failure"), 1),
+        else_=0,
+    )
+
     check_stats_q = (
         select(
             PRCheckRun.check_name,
@@ -3764,6 +3829,13 @@ async def get_ci_stats(
             func.sum(
                 case((PRCheckRun.conclusion == "failure", 1), else_=0)
             ).label("failures"),
+            func.max(
+                func.coalesce(PRCheckRun.started_at, PRCheckRun.completed_at)
+            ).label("last_run_at"),
+            func.sum(first_half_run).label("first_half_runs"),
+            func.sum(first_half_fail).label("first_half_failures"),
+            func.sum(second_half_run).label("second_half_runs"),
+            func.sum(second_half_fail).label("second_half_failures"),
         )
         .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
         .where(*pr_conditions)
@@ -3813,17 +3885,53 @@ async def get_ci_stats(
     )
 
     flaky_checks: list[FlakyCheck] = []
-    for name, total, failures in check_stats_rows:
+    for (
+        name,
+        total,
+        failures,
+        last_run_at,
+        first_runs,
+        first_fails,
+        second_runs,
+        second_fails,
+    ) in check_stats_rows:
         rate = failures / total if total else 0
-        if rate > 0.1:
-            flaky_checks.append(
-                FlakyCheck(
-                    name=name,
-                    failure_rate=round(rate, 3),
-                    total_runs=total,
-                    html_url=flaky_failure_urls.get(name) or any_urls.get(name),
-                )
+        if rate <= 0.1:
+            continue
+
+        first_runs = int(first_runs or 0)
+        second_runs = int(second_runs or 0)
+        first_fails = int(first_fails or 0)
+        second_fails = int(second_fails or 0)
+
+        first_rate: float | None = None
+        second_rate: float | None = None
+        trend: str | None = None
+        # Require ≥3 runs in each half to call a trend — smaller samples are noise.
+        if first_runs >= 3 and second_runs >= 3:
+            first_rate = round(first_fails / first_runs, 3)
+            second_rate = round(second_fails / second_runs, 3)
+            delta = second_rate - first_rate
+            if delta >= 0.10:
+                trend = "rising"
+            elif delta <= -0.10:
+                trend = "falling"
+            else:
+                trend = "stable"
+
+        flaky_checks.append(
+            FlakyCheck(
+                name=name,
+                failure_rate=round(rate, 3),
+                total_runs=total,
+                html_url=flaky_failure_urls.get(name) or any_urls.get(name),
+                category="broken" if rate >= 0.9 else "flaky",
+                last_run_at=last_run_at,
+                failure_rate_first_half=first_rate,
+                failure_rate_second_half=second_rate,
+                trend=trend,  # type: ignore[arg-type]
             )
+        )
     flaky_checks.sort(key=lambda c: c.failure_rate, reverse=True)
 
     # --- Avg build duration ---
@@ -3863,6 +3971,98 @@ async def get_ci_stats(
         avg_build_duration_s=avg_build_duration_s,
         slowest_checks=slowest_checks,
     )
+
+
+async def get_check_failure_details(
+    db: AsyncSession,
+    check_name: str,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    repo_id: int | None = None,
+    limit: int = 50,
+) -> CICheckFailuresResponse:
+    """Drill-down for a specific check: list failing PRs with author + run link."""
+    date_from, date_to = _default_range(date_from, date_to)
+
+    pr_conditions = [
+        PullRequest.created_at >= date_from,
+        PullRequest.created_at <= date_to,
+    ]
+    if repo_id is not None:
+        pr_conditions.append(PullRequest.repo_id == repo_id)
+
+    # Fall back to PR.created_at when the check run's own timestamps are null.
+    failed_at_col = func.coalesce(
+        PRCheckRun.started_at, PRCheckRun.completed_at, PullRequest.created_at
+    )
+
+    q = (
+        select(
+            PullRequest.id.label("pr_id"),
+            PullRequest.number,
+            PullRequest.title,
+            PullRequest.html_url,
+            Repository.full_name,
+            Developer.github_username,
+            Developer.avatar_url,
+            failed_at_col.label("failed_at"),
+            PRCheckRun.html_url.label("run_html_url"),
+            PRCheckRun.run_attempt,
+        )
+        .join(PullRequest, PRCheckRun.pr_id == PullRequest.id)
+        .join(Repository, PullRequest.repo_id == Repository.id)
+        .outerjoin(Developer, PullRequest.author_id == Developer.id)
+        .where(
+            *pr_conditions,
+            PRCheckRun.check_name == check_name,
+            PRCheckRun.conclusion == "failure",
+        )
+        .order_by(failed_at_col.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(q)).all()
+
+    if not rows:
+        return CICheckFailuresResponse(check_name=check_name, entries=[])
+
+    # was_eventually_green: any success run for the same pr_id + check_name with
+    # a higher run_attempt than the failure row.
+    pr_ids = {r.pr_id for r in rows}
+    success_q = (
+        select(
+            PRCheckRun.pr_id,
+            func.max(PRCheckRun.run_attempt).label("max_success_attempt"),
+        )
+        .where(
+            PRCheckRun.pr_id.in_(pr_ids),
+            PRCheckRun.check_name == check_name,
+            PRCheckRun.conclusion == "success",
+        )
+        .group_by(PRCheckRun.pr_id)
+    )
+    max_success_by_pr = {
+        pr_id: attempt for pr_id, attempt in (await db.execute(success_q)).all()
+    }
+
+    entries = [
+        CICheckFailureEntry(
+            pr_number=r.number,
+            pr_title=r.title or "",
+            pr_html_url=r.html_url,
+            repo_full_name=r.full_name,
+            author_login=r.github_username,
+            author_avatar_url=r.avatar_url,
+            failed_at=r.failed_at,
+            run_html_url=r.run_html_url,
+            run_attempt=r.run_attempt,
+            was_eventually_green=(
+                max_success_by_pr.get(r.pr_id, -1) > r.run_attempt
+            ),
+        )
+        for r in rows
+    ]
+
+    return CICheckFailuresResponse(check_name=check_name, entries=entries)
 
 
 # ---------------------------------------------------------------------------

@@ -140,15 +140,29 @@ async def test_rework_rate_respects_pr_ids_filter(
     pr1 = await _make_pr(
         db_session, repo, author, number=20, merged_at=base, files=["d.py"]
     )
-    await _make_pr(
+    pr2 = await _make_pr(
         db_session, repo, author, number=21, merged_at=base + timedelta(days=1), files=["d.py"]
     )
-    # Restrict to pr1 only
-    result = await compute_rework_rate(
+
+    # Cohort of ONE: follow-up is outside pr_ids, so it must NOT count as
+    # rework against pr1 — that was the cross-cohort contamination bug fixed
+    # in linear-insights-v2-fixes Phase 02.
+    lone = await compute_rework_rate(
         db_session,
         date_from=base - timedelta(days=5),
         date_to=base + timedelta(days=5),
         pr_ids={pr1.id},
     )
-    assert result["merges"] == 1
-    assert result["reworks"] == 1
+    assert lone["merges"] == 1
+    assert lone["reworks"] == 0
+
+    # Cohort containing both PRs: the follow-up now counts, so pr1 is
+    # reworked exactly once.
+    both = await compute_rework_rate(
+        db_session,
+        date_from=base - timedelta(days=5),
+        date_to=base + timedelta(days=5),
+        pr_ids={pr1.id, pr2.id},
+    )
+    assert both["merges"] == 2
+    assert both["reworks"] == 1

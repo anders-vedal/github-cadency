@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/table'
 import StatCard from '@/components/StatCard'
 import ErrorCard from '@/components/ErrorCard'
+import DistributionStatCard from '@/components/DistributionStatCard'
 import CumulativeFlowDiagram from '@/components/charts/CumulativeFlowDiagram'
 import LorenzCurve from '@/components/charts/LorenzCurve'
 import { useDateRange } from '@/hooks/useDateRange'
@@ -73,17 +74,18 @@ export default function Bottlenecks() {
     (i) => i.type === 'linear' && i.status === 'active',
   )
 
+  const gate = { enabled: !!hasLinear }
   const { data: summary, isLoading: summaryLoading, isError, refetch } =
-    useBottleneckSummary()
-  const { data: cfd } = useCumulativeFlow(undefined, undefined, dateFrom, dateTo)
-  const { data: wip } = useWip(4)
-  const { data: reviewLoad } = useReviewLoad(dateFrom, dateTo)
-  const { data: reviewNetwork } = useReviewNetwork(dateFrom, dateTo)
-  const { data: crossTeam } = useCrossTeamHandoffs(dateFrom, dateTo)
-  const { data: blockedChains } = useBlockedChains()
-  const { data: pingPong } = useReviewPingPong(dateFrom, dateTo)
-  const { data: busFactor } = useBusFactorFiles(90, 2)
-  const { data: cycleHist } = useCycleHistogram(dateFrom, dateTo)
+    useBottleneckSummary(gate)
+  const { data: cfd } = useCumulativeFlow(undefined, undefined, dateFrom, dateTo, gate)
+  const { data: wip } = useWip(4, gate)
+  const { data: reviewLoad } = useReviewLoad(dateFrom, dateTo, gate)
+  const { data: reviewNetwork } = useReviewNetwork(dateFrom, dateTo, gate)
+  const { data: crossTeam } = useCrossTeamHandoffs(dateFrom, dateTo, gate)
+  const { data: blockedChains } = useBlockedChains(gate)
+  const { data: pingPong } = useReviewPingPong(dateFrom, dateTo, gate)
+  const { data: busFactor } = useBusFactorFiles(90, 2, gate)
+  const { data: cycleHist } = useCycleHistogram(dateFrom, dateTo, gate)
 
   // WIP bar chart data
   const wipBars = useMemo(() => {
@@ -206,16 +208,20 @@ export default function Bottlenecks() {
 
       {/* Cycle histogram stats */}
       {cycleHist && cycleHist.sample_size > 0 && (
-        <div className="grid gap-4 sm:grid-cols-3">
-          <StatCard title="Sample size" value={cycleHist.sample_size} subtitle="PRs in range" />
+        <div className="grid gap-4 sm:grid-cols-2">
           <StatCard
-            title="Median cycle time"
-            value={formatDuration(cycleHist.p50_s)}
+            title="Sample size"
+            value={cycleHist.sample_size}
+            subtitle="PRs in range"
           />
-          <StatCard
-            title="p90 cycle time"
-            value={formatDuration(cycleHist.p90_s)}
-            subtitle={cycleHist.bimodal_analysis.is_bimodal ? 'Bimodal — investigate' : undefined}
+          <DistributionStatCard
+            title="Cycle time"
+            p50={formatDuration(cycleHist.p50_s)}
+            p90={formatDuration(cycleHist.p90_s)}
+            shapeLabel={
+              cycleHist.bimodal_analysis.is_bimodal ? 'bimodal' : undefined
+            }
+            tooltip="Time from first commit to merge. Distribution beats average here — long-tail PRs dominate the mean."
           />
         </div>
       )}

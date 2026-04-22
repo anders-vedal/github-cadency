@@ -114,12 +114,22 @@ async def get_status_time_distribution(
         if from_cat and to_cat and from_cat != to_cat:
             events_by_issue.setdefault(iid, []).append((changed_at, from_cat, to_cat))
 
-    # For each issue, accumulate time-in-from_state between consecutive transitions
+    # For each issue, accumulate time-in-state across the full window.
+    #
+    # We bracket the event sequence so the first state's duration (from ``since``
+    # until the first transition) and the final open interval (from the last
+    # transition until ``until``) are both counted. Without this, the initial
+    # state — usually the largest bucket, e.g. time in triage/backlog — is always
+    # lost, and issues still in their current state contribute zero to it.
     durations_by_state: dict[str, list[int]] = {}
     for iid, events in events_by_issue.items():
         events.sort(key=lambda x: x[0])
-        prev_time = None
-        current_state = None
+        if not events:
+            continue
+        # Seed with the first event's from_state so its duration (since → first ts)
+        # is accumulated on the first iteration.
+        prev_time = since
+        current_state = events[0][1]
         for ts, from_cat, to_cat in events:
             ts_utc = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
             if prev_time is not None and current_state:
@@ -128,6 +138,12 @@ async def get_status_time_distribution(
                     durations_by_state.setdefault(current_state, []).append(delta)
             prev_time = ts_utc
             current_state = to_cat
+        # Trailing open interval: time spent in the current state from the last
+        # transition up to ``until``.
+        if prev_time is not None and current_state:
+            delta = int((until - prev_time).total_seconds())
+            if delta > 0:
+                durations_by_state.setdefault(current_state, []).append(delta)
 
     results = []
     for state in STATUS_ORDER + ["cancelled"]:

@@ -46,6 +46,21 @@ _SANITIZE_PATTERNS = [
     (re.compile(r"(?i)(Bearer\s+|token[=:\s]+|api[_-]?key[=:\s]+)\S+"), r"\1[CREDENTIAL]"),
     (re.compile(r"(?i)password[\s:=]+\S+"), "password=[REDACTED]"),
     (re.compile(r"(?i)secret[\s:=]+\S+"), "secret=[REDACTED]"),
+    # Prefixed API keys that identify their provider in the token itself.
+    # These match without needing a preceding "Bearer" / "token=" because the
+    # prefix is diagnostic on its own. The previous version only caught 40-hex
+    # SHAs, so a raw `ghp_*` or `lin_api_*` in a pasted body sailed through.
+    # Anthropic's `sk-ant-…` comes before the generic `sk-…` so the more
+    # specific label wins.
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b"), "[REDACTED:github_pat]"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{30,}\b"), "[REDACTED:github_pat]"),
+    (re.compile(r"\bghs_[A-Za-z0-9]{30,}\b"), "[REDACTED:github_oauth]"),
+    (re.compile(r"\bgho_[A-Za-z0-9]{30,}\b"), "[REDACTED:github_oauth]"),
+    (re.compile(r"\bghu_[A-Za-z0-9]{30,}\b"), "[REDACTED:github_oauth]"),
+    (re.compile(r"\bghr_[A-Za-z0-9]{30,}\b"), "[REDACTED:github_refresh]"),
+    (re.compile(r"\blin_api_[A-Za-z0-9]{30,}\b"), "[REDACTED:linear_api_key]"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{30,}\b"), "[REDACTED:anthropic]"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"), "[REDACTED:openai]"),
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), "[UUID]"),
     (re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE), "[SHA]"),
 ]
@@ -1011,6 +1026,7 @@ _ISSUES_FIELDS = """
             slaMediumRiskAt
             slaType
             triagedAt
+            triageResponsibility { team { id } autoAssigned }
             subscribers { nodes { id } }
             reactionData
             comments(first: 50) {
@@ -1183,6 +1199,18 @@ async def _fetch_all_comment_pages(
         if not page_info.get("hasNextPage"):
             break
         cursor = page_info.get("endCursor")
+    else:
+        # Loop ran to completion without breaking → the cap was hit while the
+        # connection still had more pages. Signal this so operators can spot
+        # truncated issues; consider raising _MAX_INNER_PAGES if this becomes
+        # common in production.
+        logger.warning(
+            "linear.pagination.cap_hit",
+            issue_external_id=issue_external_id,
+            connection="comments",
+            max_pages=_MAX_INNER_PAGES,
+            event_type="system.linear_api",
+        )
     return collected
 
 
@@ -1209,6 +1237,14 @@ async def _fetch_all_history_pages(
         if not page_info.get("hasNextPage"):
             break
         cursor = page_info.get("endCursor")
+    else:
+        logger.warning(
+            "linear.pagination.cap_hit",
+            issue_external_id=issue_external_id,
+            connection="history",
+            max_pages=_MAX_INNER_PAGES,
+            event_type="system.linear_api",
+        )
     return collected
 
 
@@ -1687,6 +1723,14 @@ async def sync_linear_issues(
 
             # Triage (Phase 01)
             issue.triaged_at = _parse_datetime(i.get("triagedAt"))
+            triage_resp = i.get("triageResponsibility")
+            if triage_resp:
+                team = triage_resp.get("team") or {}
+                issue.triage_responsibility_team_id = team.get("id")
+                issue.triage_auto_assigned = bool(triage_resp.get("autoAssigned", False))
+            else:
+                issue.triage_responsibility_team_id = None
+                issue.triage_auto_assigned = False
 
             # Subscriber count (cheap bus-factor signal)
             subs = (i.get("subscribers") or {}).get("nodes") or []
@@ -1904,11 +1948,24 @@ async def link_prs_to_external_issues(
     )
     issue_id_by_identifier = {row.identifier: row.id for row in result.all()}
 
-    # Load existing links into a map for upserts
-    result = await db.execute(select(PRExternalIssueLink))
-    existing_by_pair: dict[tuple[int, int], PRExternalIssueLink] = {
-        (r.pull_request_id, r.external_issue_id): r for r in result.scalars().all()
-    }
+    # Load existing links — scoped to this integration so the linker doesn't
+    # load every link in the database on every run. As the link table grows
+    # the unscoped SELECT becomes a full-table scan loaded into memory per
+    # sync; scoping to the integration's issue ids bounds memory to this
+    # integration's footprint.
+    integration_issue_ids = list(issue_id_by_identifier.values())
+    if integration_issue_ids:
+        result = await db.execute(
+            select(PRExternalIssueLink).where(
+                PRExternalIssueLink.external_issue_id.in_(integration_issue_ids)
+            )
+        )
+        existing_by_pair: dict[tuple[int, int], PRExternalIssueLink] = {
+            (r.pull_request_id, r.external_issue_id): r
+            for r in result.scalars().all()
+        }
+    else:
+        existing_by_pair = {}
 
     # --- Pass 1: attachment-first (high confidence) ---
     # Scan ExternalIssueAttachment rows with normalized_source_type == 'github_pr'

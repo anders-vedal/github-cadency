@@ -10,7 +10,7 @@ All functions respect a date range (default: last 30 days).
 from datetime import datetime
 from statistics import median
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import (
@@ -145,13 +145,26 @@ async def get_developer_worker_profile(
     """Worker profile — issues assigned to this developer and worked on."""
     since, until = default_range(date_from, date_to)
 
-    # Issues assigned to dev, started or completed in range
+    # Issues assigned to dev, started OR completed in range.
+    # Filtering on created_at would silently drop long-lived work that was
+    # assigned mid-flight — cycle time, triage-to-start, and self-picked% all
+    # under-count on those issues otherwise.
     issues = (
         await db.execute(
             select(ExternalIssue).where(
                 ExternalIssue.assignee_developer_id == developer_id,
-                ExternalIssue.created_at >= since,
-                ExternalIssue.created_at <= until,
+                or_(
+                    and_(
+                        ExternalIssue.started_at.isnot(None),
+                        ExternalIssue.started_at >= since,
+                        ExternalIssue.started_at <= until,
+                    ),
+                    and_(
+                        ExternalIssue.completed_at.isnot(None),
+                        ExternalIssue.completed_at >= since,
+                        ExternalIssue.completed_at <= until,
+                    ),
+                ),
             )
         )
     ).scalars().all()

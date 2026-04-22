@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/table'
 import StatCard from '@/components/StatCard'
 import ErrorCard from '@/components/ErrorCard'
+import MetricsUsageBanner from '@/components/MetricsUsageBanner'
 import { useIntegrations } from '@/hooks/useIntegrations'
 import {
   useLinkageQuality,
@@ -141,6 +142,7 @@ export default function LinkageQuality() {
 
   return (
     <div className="space-y-6">
+      <MetricsUsageBanner />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Linkage Quality</h1>

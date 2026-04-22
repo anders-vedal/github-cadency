@@ -54,6 +54,50 @@ class TestSanitizePreview:
         result = sanitize_preview("The login button is broken on mobile")
         assert result == "The login button is broken on mobile"
 
+    def test_strips_github_classic_pat_without_prefix(self):
+        # Raw ghp_ in a pasted comment — previously passed through because no
+        # Bearer/token= preceded it.
+        secret = "ghp_" + "a" * 36
+        result = sanitize_preview(f"My token is {secret} please rotate")
+        assert secret not in result
+        assert "[REDACTED:github_pat]" in result
+
+    def test_strips_github_finegrained_pat(self):
+        # Bare prefix, no "token=" — the whole point is the redaction triggers
+        # from the provider prefix alone, without a preceding credential word.
+        secret = "github_pat_" + "A" * 40
+        result = sanitize_preview(f"oops I pasted {secret} in chat")
+        assert secret not in result
+        assert "[REDACTED:github_pat]" in result
+
+    def test_strips_github_oauth_server_token(self):
+        secret = "ghs_" + "z" * 36
+        result = sanitize_preview(f"header: {secret}")
+        assert secret not in result
+        assert "[REDACTED:github_oauth]" in result
+
+    def test_strips_linear_api_key_without_prefix(self):
+        secret = "lin_api_" + "b" * 40
+        result = sanitize_preview(f"curl -H '{secret}' ...")
+        assert secret not in result
+        assert "[REDACTED:linear_api_key]" in result
+
+    def test_strips_anthropic_key_before_generic_openai(self):
+        # sk-ant-... must match the Anthropic rule first, not the generic sk-.
+        # No "api_key=" prefix — that would trigger the older [CREDENTIAL]
+        # sanitizer and mask what we're actually asserting.
+        secret = "sk-ant-api03-" + "c" * 40
+        result = sanitize_preview(f"leaked {secret} yesterday")
+        assert secret not in result
+        assert "[REDACTED:anthropic]" in result
+        assert "[REDACTED:openai]" not in result
+
+    def test_strips_openai_style_key_without_prefix(self):
+        secret = "sk-" + "d" * 40
+        result = sanitize_preview(f"leaked: {secret}")
+        assert secret not in result
+        assert "[REDACTED:openai]" in result
+
 
 class TestNormalizeAttachmentSource:
     def test_github_pr_url(self):

@@ -34,11 +34,32 @@ async def get_link_quality_summary(db: AsyncSession, integration_id: int | None 
         }
 
     If ``integration_id`` is provided, scoping is limited to issues of that integration.
+    When ``integration_id`` is given, ``total_prs`` is restricted to PRs in repositories
+    that participate in that integration (i.e., repos with at least one PR linked to an
+    issue belonging to that integration). On multi-integration installs this prevents
+    the denominator from inflating with PRs from repos the integration doesn't cover.
     """
-    # Total PRs (count all PRs)
-    total_prs = (
-        await db.execute(select(func.count()).select_from(PullRequest))
-    ).scalar() or 0
+    if integration_id is not None:
+        participating_repos_subq = (
+            select(PullRequest.repo_id)
+            .select_from(PRExternalIssueLink)
+            .join(PullRequest, PullRequest.id == PRExternalIssueLink.pull_request_id)
+            .join(ExternalIssue, ExternalIssue.id == PRExternalIssueLink.external_issue_id)
+            .where(ExternalIssue.integration_id == integration_id)
+            .distinct()
+            .scalar_subquery()
+        )
+        total_prs = (
+            await db.execute(
+                select(func.count())
+                .select_from(PullRequest)
+                .where(PullRequest.repo_id.in_(participating_repos_subq))
+            )
+        ).scalar() or 0
+    else:
+        total_prs = (
+            await db.execute(select(func.count()).select_from(PullRequest))
+        ).scalar() or 0
 
     # Distinct PRs that have at least one link (optionally filtered by integration via join)
     linked_pr_query = select(func.count(func.distinct(PRExternalIssueLink.pull_request_id)))
@@ -217,8 +238,11 @@ async def get_linkage_rate_trend(
     most_recent_monday = today - timedelta(days=today.weekday())
     earliest = most_recent_monday - timedelta(weeks=weeks - 1)
 
-    # Pull minimal PR rows within range; integration-scoped if requested by
-    # joining through the links.
+    # Pull all PRs in range and the set of linked PR ids in two queries total,
+    # regardless of how many weeks the window covers. The previous
+    # implementation bucketed via Python but pulled linked ids in a second
+    # query per week — with the 12-week default this meant 2×12 = 24 queries
+    # per request. Now it's always 2.
     pr_query = select(
         PullRequest.id,
         PullRequest.created_at,
@@ -228,7 +252,6 @@ async def get_linkage_rate_trend(
     )
     pr_rows = (await db.execute(pr_query)).all()
 
-    # All PR ids with at least one link (optionally scoped to integration)
     linked_query = select(func.distinct(PRExternalIssueLink.pull_request_id))
     if integration_id is not None:
         linked_query = linked_query.join(

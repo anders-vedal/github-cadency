@@ -107,7 +107,8 @@ async def _compute_spec_quality(
     ).scalars().all()
     median_desc = int(median(desc_rows)) if desc_rows else 0
 
-    # Comments per issue (exclude system) — issues created in range
+    # Comments per issue (exclude system) — issues created in range.
+    # Used for the high_comment_issue_pct signal (top 10% bucket).
     issue_comment_counts = (
         await db.execute(
             select(
@@ -131,7 +132,58 @@ async def _compute_spec_quality(
         )
     ).all()
     counts = [c for _iid, c in issue_comment_counts]
-    median_comments = float(median(counts)) if counts else 0.0
+
+    # median_comments_before_first_pr — per spec, this is pre-PR clarification cost.
+    # For each issue with a linked PR, count comments whose created_at <= earliest
+    # linked PR's created_at. Issues without a linked PR are excluded from the sample.
+    first_pr_rows = (
+        await db.execute(
+            select(
+                ExternalIssue.id,
+                func.min(PullRequest.created_at),
+            )
+            .select_from(ExternalIssue)
+            .join(PRExternalIssueLink, PRExternalIssueLink.external_issue_id == ExternalIssue.id)
+            .join(PullRequest, PullRequest.id == PRExternalIssueLink.pull_request_id)
+            .where(
+                ExternalIssue.created_at >= since,
+                ExternalIssue.created_at <= until,
+            )
+            .group_by(ExternalIssue.id)
+        )
+    ).all()
+    first_pr_by_issue: dict[int, datetime] = {}
+    for iid, first_at in first_pr_rows:
+        if first_at is None:
+            continue
+        first_pr_by_issue[iid] = (
+            first_at.replace(tzinfo=timezone.utc) if first_at.tzinfo is None else first_at
+        )
+
+    pre_pr_counts: list[int] = []
+    if first_pr_by_issue:
+        pre_pr_rows = (
+            await db.execute(
+                select(
+                    ExternalIssueComment.issue_id,
+                    ExternalIssueComment.created_at,
+                )
+                .where(
+                    ExternalIssueComment.issue_id.in_(list(first_pr_by_issue.keys())),
+                    ExternalIssueComment.is_system_generated.is_(False),
+                )
+            )
+        ).all()
+        per_issue: dict[int, int] = {iid: 0 for iid in first_pr_by_issue}
+        for iid, c_at in pre_pr_rows:
+            first_pr = first_pr_by_issue.get(iid)
+            if not c_at or not first_pr:
+                continue
+            c_utc = c_at.replace(tzinfo=timezone.utc) if c_at.tzinfo is None else c_at
+            if c_utc <= first_pr:
+                per_issue[iid] = per_issue.get(iid, 0) + 1
+        pre_pr_counts = list(per_issue.values())
+    median_comments = float(median(pre_pr_counts)) if pre_pr_counts else 0.0
 
     # High-chatter issues = top 10% bucket
     high_threshold = 0

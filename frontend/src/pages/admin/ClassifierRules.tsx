@@ -21,6 +21,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import ErrorCard from '@/components/ErrorCard'
+import MetricsUsageBanner from '@/components/MetricsUsageBanner'
 import type { ClassifierRule } from '@/hooks/useClassifierRules'
 import {
   useClassifierRules,
@@ -123,6 +124,7 @@ export default function ClassifierRulesPage() {
 
   return (
     <div className="space-y-6">
+      <MetricsUsageBanner />
       <div>
         <h1 className="text-2xl font-bold">Classifier Rules</h1>
         <p className="text-sm text-muted-foreground">
@@ -193,7 +195,14 @@ export default function ClassifierRulesPage() {
                     ? '(ignored)'
                     : 'e.g. hotfix:, sev-1, custombot[bot]'
                 }
+                maxLength={200}
               />
+              <p className="text-[10px] text-muted-foreground">
+                Max 200 characters. Patterns for regex rule types
+                (e.g. <code className="font-mono">email_pattern</code>) are
+                ReDoS-validated — nested quantifiers and unbounded repetition
+                are rejected.
+              </p>
             </div>
             <div className="space-y-1">
               <Label className="text-xs">Priority</Label>

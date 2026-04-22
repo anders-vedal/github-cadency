@@ -23,6 +23,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import ErrorCard from '@/components/ErrorCard'
+import DistributionStatCard from '@/components/DistributionStatCard'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useIntegrations } from '@/hooks/useIntegrations'
 import {
@@ -121,12 +122,18 @@ export default function FlowAnalytics() {
     (i) => i.type === 'linear' && i.status === 'active',
   )
 
-  const { data: readiness } = useFlowReadiness()
+  const { data: readiness } = useFlowReadiness({ enabled: !!hasLinear })
   const { data: distribution, isLoading: distLoading, isError, refetch } =
-    useStatusTimeDistribution(dateFrom, dateTo)
-  const { data: regressions } = useStatusRegressions(dateFrom, dateTo)
-  const { data: triageBounces } = useTriageBounces(dateFrom, dateTo)
-  const { data: churn } = useRefinementChurn(dateFrom, dateTo)
+    useStatusTimeDistribution(dateFrom, dateTo, 'all', { enabled: !!hasLinear })
+  const { data: regressions } = useStatusRegressions(dateFrom, dateTo, {
+    enabled: !!hasLinear,
+  })
+  const { data: triageBounces } = useTriageBounces(dateFrom, dateTo, {
+    enabled: !!hasLinear,
+  })
+  const { data: churn } = useRefinementChurn(dateFrom, dateTo, {
+    enabled: !!hasLinear,
+  })
 
   if (!hasLinear) {
     return (
@@ -201,6 +208,29 @@ export default function FlowAnalytics() {
           )}
         </CardContent>
       </Card>
+
+      {/* Per-state distribution cards — surfaces p50 + p90 per status with the
+          p90/p50 volatility cue. Repeats the heatmap's data but as scannable
+          cards for the Phase 11 governance "distribution-first" principle. */}
+      {distribution && distribution.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {distribution.map((row) => {
+            const ratio = row.p50_s > 0 ? row.p90_s / row.p50_s : 1
+            const shapeLabel =
+              ratio > 3 ? 'volatile' : ratio > 2 ? 'spread' : 'consistent'
+            return (
+              <DistributionStatCard
+                key={row.status_category}
+                title={row.status_category.replace('_', ' ')}
+                p50={formatDuration(row.p50_s)}
+                p90={formatDuration(row.p90_s)}
+                shapeLabel={shapeLabel}
+                tooltip={`Time issues spend in ${row.status_category.replace('_', ' ')}. n=${row.sample_size}.`}
+              />
+            )
+          })}
+        </div>
+      )}
 
       {/* Regressions table */}
       <Card>

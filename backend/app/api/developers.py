@@ -27,6 +27,7 @@ from app.services.developer_linear import (
     get_developer_shepherd_profile,
     get_developer_worker_profile,
 )
+from app.services.linear_health import is_linear_primary
 from app.services.roles import validate_role_key
 from app.services.stats import get_activity_summary
 from app.services.teams import resolve_team
@@ -275,8 +276,14 @@ async def linear_worker_profile(
     dev = await db.get(Developer, developer_id)
     if not dev:
         raise HTTPException(status_code=404, detail="Developer not found")
-    # Worker profile is less sensitive — admin or self only (matches spec)
-    _assert_self_or_admin(dev, user)
+    # Worker profile is peer-visible per spec — anyone authenticated can see
+    # any developer's work pattern when Linear is the primary issue source.
+    # Creator + Shepherd remain self-or-admin; those carry more sensitive signal.
+    if not await is_linear_primary(db):
+        raise HTTPException(
+            status_code=409,
+            detail="Linear must be configured as the primary issue source",
+        )
     data = await get_developer_worker_profile(
         db, developer_id, date_from=date_from, date_to=date_to
     )

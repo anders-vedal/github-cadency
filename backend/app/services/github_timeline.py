@@ -12,6 +12,7 @@ sync loop; for now callers can drive it via the public entry points below.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,6 +27,33 @@ from app.services.github_sync import resolve_author
 logger = get_logger(__name__)
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+
+# Fraction of the rate-limit budget below which we proactively sleep until reset.
+# GitHub's cap is 5000 points/hour; < 10% → sleep.
+_RATE_LIMIT_SLEEP_THRESHOLD = 0.10
+
+# Ordered list of timeline item types the batched query requests. Kept as a
+# Python tuple so both ``_fetch_single_batch`` (which passes it as a GraphQL
+# variable) and the schema-aligned TIMELINE_QUERY below can stay in sync.
+_TIMELINE_ITEM_TYPES: tuple[str, ...] = (
+    "REVIEW_REQUESTED_EVENT",
+    "REVIEW_REQUEST_REMOVED_EVENT",
+    "REVIEW_DISMISSED_EVENT",
+    "ASSIGNED_EVENT",
+    "UNASSIGNED_EVENT",
+    "LABELED_EVENT",
+    "UNLABELED_EVENT",
+    "HEAD_REF_FORCE_PUSHED_EVENT",
+    "READY_FOR_REVIEW_EVENT",
+    "CONVERT_TO_DRAFT_EVENT",
+    "RENAMED_TITLE_EVENT",
+    "CROSS_REFERENCED_EVENT",
+    "ADDED_TO_MERGE_QUEUE_EVENT",
+    "REMOVED_FROM_MERGE_QUEUE_EVENT",
+    "AUTO_MERGE_ENABLED_EVENT",
+    "AUTO_MERGE_DISABLED_EVENT",
+    "MARKED_AS_DUPLICATE_EVENT",
+)
 
 # Each typename maps to the short `event_type` we store on `pr_timeline_events`.
 # Keep this list in lockstep with the timelineItems itemTypes argument in
@@ -245,17 +273,14 @@ async def fetch_pr_timeline_batch(
     return result
 
 
-async def _fetch_single_batch(
-    client: httpx.AsyncClient,
-    token: str,
-    repo_owner: str,
-    repo_name: str,
-    pr_numbers: list[int],
-) -> dict[int, list[dict[str, Any]]]:
-    """Execute one aliased GraphQL request for the given (bounded) PR list."""
-    # Build one aliased repository->pullRequest block per PR number. Sharing
-    # the repository() field via alias is the cheap pattern — we pay per
-    # pullRequest() selection but only one rateLimit accounting.
+def _build_batch_query(pr_numbers: list[int]) -> str:
+    """Compose the aliased GraphQL document for a single batch.
+
+    The item-type enum list is declared once as a query variable and each
+    alias block references it — collapses the per-alias tokens from ~30 enum
+    names to a single ``$itemTypes`` reference. Node selections reference the
+    ``TimelineNode`` fragment so the per-type projection is defined once.
+    """
     alias_blocks: list[str] = []
     for num in pr_numbers:
         alias = f"pr{num}"
@@ -263,25 +288,7 @@ async def _fetch_single_batch(
             f"""
             {alias}: repository(owner: $owner, name: $name) {{
               pullRequest(number: {num}) {{
-                timelineItems(first: 100, itemTypes: [
-                  REVIEW_REQUESTED_EVENT,
-                  REVIEW_REQUEST_REMOVED_EVENT,
-                  REVIEW_DISMISSED_EVENT,
-                  ASSIGNED_EVENT,
-                  UNASSIGNED_EVENT,
-                  LABELED_EVENT,
-                  UNLABELED_EVENT,
-                  HEAD_REF_FORCE_PUSHED_EVENT,
-                  READY_FOR_REVIEW_EVENT,
-                  CONVERT_TO_DRAFT_EVENT,
-                  RENAMED_TITLE_EVENT,
-                  CROSS_REFERENCED_EVENT,
-                  ADDED_TO_MERGE_QUEUE_EVENT,
-                  REMOVED_FROM_MERGE_QUEUE_EVENT,
-                  AUTO_MERGE_ENABLED_EVENT,
-                  AUTO_MERGE_DISABLED_EVENT,
-                  MARKED_AS_DUPLICATE_EVENT
-                ]) {{
+                timelineItems(first: 100, itemTypes: $itemTypes) {{
                   nodes {{
                     ...TimelineNode
                   }}
@@ -290,36 +297,137 @@ async def _fetch_single_batch(
             }}
             """.strip()
         )
-
-    query = (
-        "query($owner: String!, $name: String!) {\n"
+    return (
+        "query("
+        "$owner: String!, "
+        "$name: String!, "
+        "$itemTypes: [PullRequestTimelineItemsItemType!]!"
+        ") {\n"
         + "\n".join(alias_blocks)
-        + "\n  rateLimit { cost remaining resetAt }\n}\n"
+        + "\n  rateLimit { cost limit remaining resetAt }\n}\n"
         + _TIMELINE_FRAGMENT
     )
-    variables = {"owner": repo_owner, "name": repo_name}
 
-    resp = await client.post(
-        GITHUB_GRAPHQL_URL,
-        json={"query": query, "variables": variables},
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    if "errors" in payload and payload["errors"]:
-        # GraphQL can return partial data alongside errors; log and keep going
-        # if we at least got something back.
+
+def _rate_limit_sleep_seconds(rate_limit: dict[str, Any]) -> float:
+    """Return seconds to sleep when GitHub's rate budget is nearly exhausted.
+
+    0 means "no sleep needed". Uses ``limit`` if present; falls back to the
+    published REST cap of 5000 (GraphQL shares the primary budget).
+    """
+    remaining = rate_limit.get("remaining")
+    limit = rate_limit.get("limit") or 5000
+    reset_at = rate_limit.get("resetAt")
+    if remaining is None or not limit:
+        return 0.0
+    try:
+        ratio = float(remaining) / float(limit)
+    except (TypeError, ValueError):
+        return 0.0
+    if ratio >= _RATE_LIMIT_SLEEP_THRESHOLD:
+        return 0.0
+    if not reset_at:
+        return 0.0
+    try:
+        reset_dt = datetime.fromisoformat(str(reset_at).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    now = datetime.now(timezone.utc)
+    return max(0.0, (reset_dt - now).total_seconds())
+
+
+def _looks_like_rate_limit_error(errors: list[dict[str, Any]]) -> bool:
+    """Heuristic: any GraphQL error whose type or message names rate limiting."""
+    for err in errors or []:
+        err_type = (err.get("type") or "").upper()
+        msg = (err.get("message") or "").lower()
+        if "RATE_LIMIT" in err_type or "rate limit" in msg or "secondary rate limit" in msg:
+            return True
+    return False
+
+
+async def _fetch_single_batch(
+    client: httpx.AsyncClient,
+    token: str,
+    repo_owner: str,
+    repo_name: str,
+    pr_numbers: list[int],
+) -> dict[int, list[dict[str, Any]]]:
+    """Execute one aliased GraphQL request for the given (bounded) PR list."""
+    query = _build_batch_query(pr_numbers)
+    variables = {
+        "owner": repo_owner,
+        "name": repo_name,
+        "itemTypes": list(_TIMELINE_ITEM_TYPES),
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    async def _post() -> httpx.Response:
+        return await client.post(
+            GITHUB_GRAPHQL_URL,
+            json={"query": query, "variables": variables},
+            headers=headers,
+        )
+
+    resp = await _post()
+
+    # 403 on GitHub's GraphQL endpoint is typically a rate-limit or secondary
+    # rate-limit signal. Retry once after the computed sleep; a second 403 is
+    # propagated so the sync aborts cleanly rather than looping.
+    if resp.status_code == 403:
+        retry_after = resp.headers.get("Retry-After")
+        try:
+            sleep_s = float(retry_after) if retry_after else 60.0
+        except ValueError:
+            sleep_s = 60.0
         logger.warning(
-            "GraphQL timeline query returned errors",
-            repo=f"{repo_owner}/{repo_name}",
-            errors=payload["errors"][:3],
+            "github.rate_limit.backoff",
+            sleep_s=sleep_s,
+            remaining=resp.headers.get("X-RateLimit-Remaining"),
+            reset_at=resp.headers.get("X-RateLimit-Reset"),
+            phase="403_retry",
             event_type="system.github_api",
         )
-        if not payload.get("data"):
-            raise GitHubGraphQLError(str(payload["errors"])[:500])
+        await asyncio.sleep(min(sleep_s, 300.0))
+        resp = await _post()
+        if resp.status_code == 403:
+            resp.raise_for_status()
+
+    resp.raise_for_status()
+    payload = resp.json()
+    errors = payload.get("errors") or []
+    if errors:
+        # GraphQL can return partial data alongside errors; log and keep going
+        # if we at least got something back. But if all errors look like rate
+        # limiting, back off once and retry rather than silently giving up.
+        if _looks_like_rate_limit_error(errors) and not payload.get("data"):
+            sleep_s = _rate_limit_sleep_seconds(
+                (payload.get("data") or {}).get("rateLimit") or {}
+            ) or 60.0
+            logger.warning(
+                "github.rate_limit.backoff",
+                sleep_s=sleep_s,
+                errors=errors[:3],
+                phase="graphql_retry",
+                event_type="system.github_api",
+            )
+            await asyncio.sleep(min(sleep_s, 300.0))
+            resp = await _post()
+            resp.raise_for_status()
+            payload = resp.json()
+            errors = payload.get("errors") or []
+        if errors:
+            logger.warning(
+                "GraphQL timeline query returned errors",
+                repo=f"{repo_owner}/{repo_name}",
+                errors=errors[:3],
+                event_type="system.github_api",
+            )
+            if not payload.get("data"):
+                raise GitHubGraphQLError(str(errors)[:500])
 
     data = payload.get("data") or {}
     rate_limit = data.get("rateLimit") or {}
@@ -328,10 +436,27 @@ async def _fetch_single_batch(
             "GraphQL timeline rate limit",
             cost=rate_limit.get("cost"),
             remaining=rate_limit.get("remaining"),
+            limit=rate_limit.get("limit"),
             reset_at=rate_limit.get("resetAt"),
             pr_count=len(pr_numbers),
             event_type="system.github_api",
         )
+        # Proactively sleep when the budget is almost gone — this is the key
+        # missing behaviour from the previous implementation: the rate-limit
+        # was logged but never enforced, so consecutive batches on a large
+        # repo would eventually 403 rather than pausing cleanly.
+        sleep_s = _rate_limit_sleep_seconds(rate_limit)
+        if sleep_s > 0:
+            logger.warning(
+                "github.rate_limit.backoff",
+                sleep_s=sleep_s,
+                remaining=rate_limit.get("remaining"),
+                limit=rate_limit.get("limit"),
+                reset_at=rate_limit.get("resetAt"),
+                phase="preemptive",
+                event_type="system.github_api",
+            )
+            await asyncio.sleep(min(sleep_s, 3600.0))
 
     out: dict[int, list[dict[str, Any]]] = {}
     for num in pr_numbers:

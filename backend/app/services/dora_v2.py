@@ -15,6 +15,12 @@ from app.models.models import PRFile, PullRequest
 from app.services.ai_cohort import classify_ai_cohorts_batch, default_rules as default_ai_rules
 from app.services.utils import default_range
 
+# Files touched by more than this many PRs in the window are treated as
+# "everyone edits this" — usually package.json, README.md, lock files, i18n
+# catalogs — and excluded from the rework self-join. Without this filter the
+# cartesian blast radius on a noisy file can dwarf the real rework signal.
+_REWORK_FILE_POPULARITY_THRESHOLD = 20
+
 # DORA 2024 bands per elite/high/medium/low cut points (approximate published numbers)
 BANDS_DEPLOY_FREQUENCY = [  # deploys per day
     ("elite", 1.0),
@@ -116,6 +122,38 @@ async def compute_rework_rate(
     # uniformly across SQLite and PostgreSQL. The join alone reduces the previous
     # N+1 loop to a single database round trip — Python-side filtering scales
     # with the number of file-overlap pairs (small) rather than merged PRs.
+    #
+    # When ``pr_ids`` scopes to a cohort, the follow-up side must be scoped too —
+    # otherwise a follow-up from a different cohort counts as rework against the
+    # current cohort's base PRs (e.g. an AI-authored fixup would inflate the
+    # human cohort's rework rate).
+    followup_filters = [
+        followup_pr.id != base_pr.id,
+        followup_pr.merged_at.isnot(None),
+        followup_pr.merged_at > base_pr.merged_at,
+    ]
+    if pr_ids is not None:
+        followup_filters.append(followup_pr.id.in_(pr_ids))
+
+    # Pre-filter out "everyone touches it" files (package.json, lock files,
+    # i18n catalogs, root READMEs). Without this, a repo where every PR edits
+    # the same file produces a cartesian explosion of overlap pairs that has
+    # no real rework signal.
+    popular_files_subq = (
+        select(PRFile.filename)
+        .join(PullRequest, PullRequest.id == PRFile.pr_id)
+        .where(
+            PullRequest.merged_at.isnot(None),
+            PullRequest.merged_at >= since,
+            PullRequest.merged_at <= until,
+        )
+        .group_by(PRFile.filename)
+        .having(
+            func.count(func.distinct(PRFile.pr_id)) > _REWORK_FILE_POPULARITY_THRESHOLD
+        )
+        .scalar_subquery()
+    )
+
     reworks_query = (
         select(
             base_pr.id.label("base_id"),
@@ -128,9 +166,8 @@ async def compute_rework_rate(
         .join(followup_pr, followup_pr.id == followup_file.pr_id)
         .where(
             *base_filters,
-            followup_pr.id != base_pr.id,
-            followup_pr.merged_at.isnot(None),
-            followup_pr.merged_at > base_pr.merged_at,
+            *followup_filters,
+            base_file.filename.notin_(popular_files_subq),
         )
     )
     rows = (await db.execute(reworks_query)).all()
@@ -165,12 +202,45 @@ async def get_dora_v2(
 
     since, until = default_range(date_from, date_to)
 
-    # Compute baseline DORA using the existing service
+    # Classify every merged PR in range into a cohort bucket once. The
+    # classification is reused for both the cohort-filtered top-level rework_rate
+    # and the per-cohort breakdown, so we only pay for it once per request.
+    pr_rows = (
+        await db.execute(
+            select(PullRequest.id)
+            .where(
+                PullRequest.merged_at.isnot(None),
+                PullRequest.merged_at >= since,
+                PullRequest.merged_at <= until,
+            )
+        )
+    ).scalars().all()
+    from app.services.classifier_rules import load_ai_detection_rules
+
+    ai_rules = await load_ai_detection_rules(db)
+    cohorts_map = await classify_ai_cohorts_batch(db, pr_rows, rules=ai_rules)
+    cohort_buckets: dict[str, set[int]] = defaultdict(set)
+    for pid, c in cohorts_map.items():
+        cohort_buckets[c].add(pid)
+
+    # When a specific cohort is selected, scope the top-level rework_rate to
+    # that cohort's PR ids. Deployment-based metrics (deploy_frequency, lead_time,
+    # MTTR, change_failure_rate) can't be cleanly attributed to a PR cohort —
+    # Deployments don't carry a cohort signal. They remain computed over all
+    # deployments in range regardless of the cohort filter.
+    if cohort != "all":
+        scoped_pr_ids: set[int] | None = cohort_buckets.get(cohort, set())
+    else:
+        scoped_pr_ids = None
+
+    # Compute baseline DORA using the existing service (deployment-based)
     baseline = await get_dora_metrics(db, date_from=since, date_to=until)
     baseline_d = baseline.model_dump()
 
-    # Rework rate over same window
-    rework = await compute_rework_rate(db, date_from=since, date_to=until)
+    # Rework rate — PR-based, cohort-filterable
+    rework = await compute_rework_rate(
+        db, date_from=since, date_to=until, pr_ids=scoped_pr_ids
+    )
 
     throughput = {
         "deployment_frequency": baseline_d.get("deploy_frequency"),
@@ -193,27 +263,8 @@ async def get_dora_v2(
     }
     bands["overall"] = _overall_band(bands)
 
-    # Cohorts — restrict to PRs in range, classify, compute per-cohort rework
-    pr_rows = (
-        await db.execute(
-            select(PullRequest.id)
-            .where(
-                PullRequest.merged_at.isnot(None),
-                PullRequest.merged_at >= since,
-                PullRequest.merged_at <= until,
-            )
-        )
-    ).scalars().all()
-    # Merge admin-editable rules on top of the hard-coded defaults so
-    # /admin/classifier-rules customisations take effect here.
-    from app.services.classifier_rules import load_ai_detection_rules
-
-    ai_rules = await load_ai_detection_rules(db)
-    cohorts_map = await classify_ai_cohorts_batch(db, pr_rows, rules=ai_rules)
-    cohort_buckets: dict[str, set[int]] = defaultdict(set)
-    for pid, c in cohorts_map.items():
-        cohort_buckets[c].add(pid)
-
+    # Per-cohort breakdown always computed across all four cohorts regardless of
+    # the top-level filter, so the comparison card stays populated.
     cohort_results: dict[str, dict] = {}
     for cohort_name in ("human", "ai_reviewed", "ai_authored", "hybrid"):
         ids = cohort_buckets.get(cohort_name, set())
@@ -237,6 +288,15 @@ async def get_dora_v2(
         "stability": stability,
         "bands": bands,
         "cohorts": cohort_results,
+        # Tells the UI which metrics honored the cohort filter, so it can badge
+        # the deployment-based ones as "all PRs" rather than silently lying.
+        "cohort_filter_applied": {
+            "deployment_frequency": False,
+            "lead_time_hours": False,
+            "mttr_hours": False,
+            "change_failure_rate": False,
+            "rework_rate": cohort != "all",
+        },
         "date_from": since.isoformat(),
         "date_to": until.isoformat(),
     }

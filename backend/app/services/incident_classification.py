@@ -14,10 +14,24 @@ from typing import Literal, Optional
 IncidentKind = Literal["incident", "hotfix"] | None
 
 
+# Default allowed conventional-commit prefixes for direct-push detection.
+# A direct push whose subject doesn't start with any of these is treated as an
+# incident candidate (unreviewed production change without a recognised intent).
+DEFAULT_ALLOWED_DIRECT_PUSH_PREFIXES = (
+    "feat", "fix", "docs", "chore", "refactor", "test", "style",
+    "ci", "build", "perf", "revert",
+)
+
+
 @dataclass
 class IncidentRule:
     rule_type: Literal[
-        "linear_label", "linear_issue_type", "github_label", "pr_title_prefix", "revert_detection"
+        "linear_label",
+        "linear_issue_type",
+        "github_label",
+        "pr_title_prefix",
+        "revert_detection",
+        "direct_push_no_review",
     ]
     pattern: str
     is_hotfix: bool
@@ -47,6 +61,27 @@ class IncidentRule:
         if self.rule_type != "linear_issue_type":
             return False
         return (issue_type or "").lower() == self.pattern.lower()
+
+    def match_direct_push(self, message: str, is_direct_push: bool) -> bool:
+        """A direct push matches when the commit bypassed review AND the first
+        line of the commit message doesn't start with an allowed prefix.
+
+        ``pattern`` is comma-separated allowed prefixes. Empty pattern falls
+        back to :data:`DEFAULT_ALLOWED_DIRECT_PUSH_PREFIXES`.
+        """
+        if self.rule_type != "direct_push_no_review":
+            return False
+        if not is_direct_push:
+            return False
+        configured = [
+            p.strip().lower() for p in (self.pattern or "").split(",") if p.strip()
+        ]
+        allowed = configured or list(DEFAULT_ALLOWED_DIRECT_PUSH_PREFIXES)
+        subject = (message or "").splitlines()[0].strip().lower() if message else ""
+        for prefix in allowed:
+            if subject.startswith(prefix):
+                return False
+        return True
 
 
 def default_rules() -> list[IncidentRule]:
@@ -121,6 +156,18 @@ def default_rules() -> list[IncidentRule]:
             is_incident=True,
             priority=40,
         ),
+        # Direct push to main with no review + no conventional prefix.
+        # Pattern is empty → uses DEFAULT_ALLOWED_DIRECT_PUSH_PREFIXES. Admins can
+        # override via the classifier-rules admin page (same rule_type, custom
+        # pattern). Runs at a lower priority than explicit label / prefix rules
+        # so opt-in markers win on ambiguous commits.
+        IncidentRule(
+            rule_type="direct_push_no_review",
+            pattern="",
+            is_hotfix=False,
+            is_incident=True,
+            priority=50,
+        ),
     ]
 
 
@@ -130,8 +177,16 @@ def classify_pr(
     linear_labels: list[str] | None = None,
     linear_issue_type: str | None = None,
     rules: list[IncidentRule] | None = None,
+    is_direct_push_to_main: bool = False,
 ) -> IncidentKind:
-    """Run all rules in priority order; first match returns the classification."""
+    """Run all rules in priority order; first match returns the classification.
+
+    ``is_direct_push_to_main`` indicates the change landed on the default branch
+    without an associated PR (caller must detect this — typically by checking
+    that the commit SHA does not appear in any merged PR's merge_commit_sha or
+    commits list). The ``direct_push_no_review`` rule type only matches when
+    this flag is set.
+    """
     active_rules = sorted(rules or default_rules(), key=lambda r: r.priority)
 
     for r in active_rules:
@@ -146,6 +201,8 @@ def classify_pr(
             matched = r.match_linear_label(linear_labels or [])
         elif r.rule_type == "linear_issue_type":
             matched = r.match_linear_issue_type(linear_issue_type)
+        elif r.rule_type == "direct_push_no_review":
+            matched = r.match_direct_push(pr_title, is_direct_push_to_main)
         if matched:
             if r.is_incident:
                 return "incident"

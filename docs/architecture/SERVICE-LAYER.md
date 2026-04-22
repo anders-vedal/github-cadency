@@ -1,6 +1,6 @@
 ---
 purpose: "Service responsibilities, cross-service deps, async patterns, sync architecture, key algorithms"
-last-updated: "2026-04-22"
+last-updated: "2026-04-22 (post linear-insights-v2-fixes)"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -15,7 +15,7 @@ related:
 | Service | File | LOC | Role |
 |---------|------|-----|------|
 | `github_sync` | `services/github_sync.py` | ~2400 | GitHub App auth, rate limiting, all upsert helpers, sync orchestration |
-| `stats` | `services/stats.py` | ~3200 | All metrics: developer, team, repo, benchmarks v2 (15 metrics), trends, workload, CI, DORA, repos summary, issue linkage by developer |
+| `stats` | `services/stats.py` | ~3200 | All metrics: developer, team, repo, benchmarks v2 (now 17 metrics — added `avg_downstream_pr_review_rounds` and `sample_size_downstream_prs` when Linear is primary, so ticket-clarity flows into team benchmark percentiles), trends, workload, CI, DORA, repos summary, issue linkage by developer |
 | `collaboration` | `services/collaboration.py` | ~200 | Collaboration matrix, silos, bus factors, isolation detection |
 | `risk` | `services/risk.py` | ~250 | PR risk scoring (pure function + async wrappers) |
 | `goals` | `services/goals.py` | ~250 | Goal CRUD, metric computation, auto-achievement |
@@ -32,21 +32,22 @@ related:
 | `exceptions` | `services/exceptions.py` | ~25 | Custom service-layer exceptions (`AIFeatureDisabledError`, `AIBudgetExceededError`) |
 | `ai_schedules` | `services/ai_schedules.py` | ~260 | AI analysis scheduling CRUD, schedule execution, next-run computation |
 | `encryption` | `services/encryption.py` | ~35 | Shared Fernet encryption for Slack tokens and Linear API keys |
-| `linear_sync` | `services/linear_sync.py` | ~2000 | Linear GraphQL sync orchestration: projects → project updates → cycles → issues (with per-issue comments/history/attachments/relations) → 4-pass PR linker → developer mapping. Rate limit handling covers both HTTP 429 and HTTP 400 `RATELIMITED`. Includes `sanitize_preview()`, `normalize_attachment_source()`, `run_linear_relink()` admin entry point |
+| `linear_sync` | `services/linear_sync.py` | ~2000 | Linear GraphQL sync orchestration: projects → project updates → cycles → issues (with per-issue comments/history/attachments/relations, including `triageResponsibility`) → 4-pass PR linker → developer mapping. Rate limit handling covers both HTTP 429 and HTTP 400 `RATELIMITED`; inner-page pagination emits `linear.pagination.cap_hit` when `_MAX_INNER_PAGES` is reached. Includes `sanitize_preview()` (strips emails/UUIDs/SHAs plus provider-prefixed secrets: `ghp_`, `ghs_`, `gho_`, `ghu_`, `ghr_`, `github_pat_`, `lin_api_`, `sk-ant-`, `sk-`), `normalize_attachment_source()`, `run_linear_relink()` admin entry point. Linker preload is scoped to the integration's issue ids (not a full-table scan) |
 | `sprint_stats` | `services/sprint_stats.py` | ~560 | Sprint/planning stats: velocity, completion, scope creep, triage, alignment, estimation accuracy |
-| `linear_health` | `services/linear_health.py` | ~360 | Phase 03: 5-signal usage health (adoption, spec quality, autonomy, dialogue health, creator outcome) + `is_linear_primary()` guard |
-| `linkage_quality` | `services/linkage_quality.py` | ~170 | Phase 02: PR↔issue linkage summary — confidence/source breakdown + unlinked + disagreement PRs |
-| `issue_conversations` | `services/issue_conversations.py` | ~330 | Phase 04: chattiest issues with filters, comment↔bounce scatter, first-response histogram, participant distribution |
-| `flow_analytics` | `services/flow_analytics.py` | ~290 | Phase 06: status-time p50/p75/p90/p95, status regressions, triage bounces, refinement churn + readiness gate |
+| `linear_health` | `services/linear_health.py` | ~360 | Phase 03: 5-signal usage health (adoption, spec quality, autonomy, dialogue health, creator outcome) + `is_linear_primary()` guard. `median_comments_before_first_pr` = median of non-system comments whose `created_at <= first_linked_pr.created_at`; issues without a linked PR are excluded from the sample |
+| `linkage_quality` | `services/linkage_quality.py` | ~170 | Phase 02: PR↔issue linkage summary — confidence/source breakdown + unlinked + disagreement PRs. When `integration_id` is provided, `total_prs` is scoped to repos that have any PR linked to issues of that integration (Repository doesn't carry `integration_id`; this is the semantic proxy for "PRs in Linear-participating repos") |
+| `issue_conversations` | `services/issue_conversations.py` | ~330 | Phase 04: chattiest issues with filters, comment↔bounce scatter, first-response histogram, participant distribution. Label filter runs in SQL via `cast(labels, String).like('%"label"%')` (portable across PostgreSQL + SQLite) so it applies before `LIMIT` — the JSONB `.contains()` operator emits `@>` which SQLite can't parse |
+| `flow_analytics` | `services/flow_analytics.py` | ~290 | Phase 06: status-time p50/p75/p90/p95, status regressions, triage bounces, refinement churn + readiness gate. `get_status_time_distribution` brackets each issue's event sequence: seeds `prev_time = since`, `current_state = events[0].from_state_category` and closes with the trailing interval to `until`, so initial-state duration and open-interval tail are both counted |
 | `bottleneck_intelligence` | `services/bottleneck_intelligence.py` | ~480 | Phase 07: CFD, WIP, review-load Gini, review network, cross-team handoffs, blocked chains, ping-pong, bus factor, bimodal cycle time, top-5 digest |
-| `developer_linear` | `services/developer_linear.py` | ~240 | Phase 05: per-developer creator / worker / shepherd profiles from Linear data |
-| `github_timeline` | `services/github_timeline.py` | ~480 | Phase 09: `timelineItems` GraphQL fetch (alias-batched), `persist_timeline_events`, `derive_pr_aggregates` (force-push count, ready_for_review, merge queue latency, etc.) |
+| `developer_linear` | `services/developer_linear.py` | ~240 | Phase 05: per-developer creator / worker / shepherd profiles from Linear data. Worker issues are the union of "started in range" OR "completed in range" (NOT `created_at`-based) so long-lived work that was assigned mid-flight is counted |
+| `github_timeline` | `services/github_timeline.py` | ~480 | Phase 09: `timelineItems` GraphQL fetch (alias-batched with a shared `$itemTypes` variable — one enum list per document instead of 17 enums per alias), `persist_timeline_events`, `derive_pr_aggregates` (force-push count, ready_for_review, merge queue latency, etc.). Enforces rate-limit back-off: preemptive sleep until `resetAt` when `rateLimit.remaining / limit < 10%`, plus one-shot 403 retry honouring `Retry-After` |
 | `pr_cycle_stages` | `services/pr_cycle_stages.py` | ~180 | Phase 09: per-PR stage decomposition (open→ready→first_review→approved→merged), p50/p75/p90 by stage |
 | `codeowners` | `services/codeowners.py` | ~200 | Phase 09: CODEOWNERS parse (comments, wildcards, dir patterns, `**`) + `check_bypass()` detector |
 | `ai_cohort` | `services/ai_cohort.py` | ~140 | Phase 10: classify each PR as `human`/`ai_reviewed`/`ai_authored`/`hybrid` via reviewer usernames, labels, commit emails |
-| `dora_v2` | `services/dora_v2.py` | ~210 | Phase 10: wraps `get_dora_metrics` with throughput/stability split, rework rate (7-day same-file follow-up), DORA 2024 bands, per-cohort breakdown |
-| `incident_classification` | `services/incident_classification.py` | ~120 | Phase 10: hotfix/incident rule engine — default priority-ordered rules (revert, prefix, sev-1/sev-2 labels) |
-| `metric_spec` | `services/metric_spec.py` | ~180 | Phase 11: `MetricSpec` registry + `BANNED_METRICS` + `validate_registry()` (raises at import on missing paired outcomes) + `get_catalog()` |
+| `dora_v2` | `services/dora_v2.py` | ~210 | Phase 10: wraps `get_dora_metrics` with throughput/stability split, rework rate (7-day same-file follow-up), DORA 2024 bands, per-cohort breakdown. When `cohort != "all"`, scopes top-level `rework_rate` to the cohort's PR ids; `compute_rework_rate` applies `pr_ids` symmetrically to base + follow-up sides (no cross-cohort contamination); excludes files touched by > `_REWORK_FILE_POPULARITY_THRESHOLD=20` PRs in the window to bound the self-join blast radius. Response includes `cohort_filter_applied` disclosure flags so the UI can badge deployment-based metrics as "all PRs" |
+| `incident_classification` | `services/incident_classification.py` | ~120 | Phase 10: hotfix/incident rule engine — default priority-ordered rules (revert, prefix, sev-1/sev-2 labels, plus `direct_push_no_review` which flags commits pushed straight to the default branch without a conventional prefix). `classify_pr` accepts `is_direct_push_to_main: bool` so the direct-push rule only activates when the caller has verified the commit has no associated PR |
+| `classifier_rules` | `services/classifier_rules.py` | ~220 | Phase 10 C3: admin CRUD for `ClassifierRule` rows layered on top of defaults. `_validate_pattern` enforces `MAX_PATTERN_LENGTH=200` unconditionally + `work_categories._validate_regex_safe` ReDoS guard on rule types in `REGEX_RULE_TYPES` (currently `email_pattern`). Runs on both create AND update paths |
+| `metric_spec` | `services/metric_spec.py` | ~180 | Phase 11: `MetricSpec` registry + `BANNED_METRICS` + `validate_registry()` (raises at import on missing paired outcomes) + `get_catalog()`. Registry is rendered to `docs/metrics/catalog.md` via `backend/scripts/generate_metrics_catalog.py` |
 | `utils` | `services/utils.py` | ~15 | Shared utilities (`default_range` date defaulting) |
 
 ## Cross-Service Dependencies

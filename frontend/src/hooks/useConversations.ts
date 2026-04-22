@@ -19,7 +19,10 @@ export interface ChattiestIssuesFilters {
   hasLinkedPr?: boolean
 }
 
-export function useChattiestIssues(filters: ChattiestIssuesFilters = {}) {
+export function useChattiestIssues(
+  filters: ChattiestIssuesFilters = {},
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = new URLSearchParams()
   if (filters.dateFrom) params.set('date_from', filters.dateFrom)
   if (filters.dateTo) params.set('date_to', filters.dateTo)
@@ -34,10 +37,15 @@ export function useChattiestIssues(filters: ChattiestIssuesFilters = {}) {
     queryKey: ['chattiest-issues', filters],
     queryFn: () => apiFetch(`/conversations/chattiest?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 
-export function useCommentBounceScatter(dateFrom?: string, dateTo?: string) {
+export function useCommentBounceScatter(
+  dateFrom?: string,
+  dateTo?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = new URLSearchParams()
   if (dateFrom) params.set('date_from', dateFrom)
   if (dateTo) params.set('date_to', dateTo)
@@ -45,10 +53,15 @@ export function useCommentBounceScatter(dateFrom?: string, dateTo?: string) {
     queryKey: ['conversations-scatter', dateFrom, dateTo],
     queryFn: () => apiFetch(`/conversations/scatter?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 
-export function useFirstResponseHistogram(dateFrom?: string, dateTo?: string) {
+export function useFirstResponseHistogram(
+  dateFrom?: string,
+  dateTo?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = new URLSearchParams()
   if (dateFrom) params.set('date_from', dateFrom)
   if (dateTo) params.set('date_to', dateTo)
@@ -56,10 +69,15 @@ export function useFirstResponseHistogram(dateFrom?: string, dateTo?: string) {
     queryKey: ['first-response-histogram', dateFrom, dateTo],
     queryFn: () => apiFetch(`/conversations/first-response?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 
-export function useParticipantDistribution(dateFrom?: string, dateTo?: string) {
+export function useParticipantDistribution(
+  dateFrom?: string,
+  dateTo?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const params = new URLSearchParams()
   if (dateFrom) params.set('date_from', dateFrom)
   if (dateTo) params.set('date_to', dateTo)
@@ -67,6 +85,7 @@ export function useParticipantDistribution(dateFrom?: string, dateTo?: string) {
     queryKey: ['participant-distribution', dateFrom, dateTo],
     queryFn: () => apiFetch(`/conversations/participants?${params}`),
     staleTime: 60_000,
+    enabled,
   })
 }
 

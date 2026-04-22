@@ -803,6 +803,11 @@ export interface FlakyCheck {
   failure_rate: number
   total_runs: number
   html_url?: string | null
+  category: 'broken' | 'flaky'
+  last_run_at: string | null
+  failure_rate_first_half: number | null
+  failure_rate_second_half: number | null
+  trend: 'rising' | 'falling' | 'stable' | null
 }
 
 export interface SlowestCheck {
@@ -817,6 +822,24 @@ export interface CIStatsResponse {
   flaky_checks: FlakyCheck[]
   avg_build_duration_s: number | null
   slowest_checks: SlowestCheck[]
+}
+
+export interface CICheckFailureEntry {
+  pr_number: number
+  pr_title: string
+  pr_html_url: string | null
+  repo_full_name: string
+  author_login: string | null
+  author_avatar_url: string | null
+  failed_at: string
+  run_html_url: string | null
+  run_attempt: number
+  was_eventually_green: boolean
+}
+
+export interface CICheckFailuresResponse {
+  check_name: string
+  entries: CICheckFailureEntry[]
 }
 
 // --- DORA Metrics (P4-01) ---

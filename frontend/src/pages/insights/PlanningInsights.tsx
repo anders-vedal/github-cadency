@@ -34,7 +34,7 @@ export default function PlanningInsights() {
   if (!hasLinear) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Planning</h1>
+        <h1 className="text-2xl font-bold">Planning Health</h1>
         <Card>
           <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
             <AlertTriangle className="h-10 w-10 text-muted-foreground" />
@@ -59,7 +59,7 @@ export default function PlanningInsights() {
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Planning</h1>
+        <h1 className="text-2xl font-bold">Planning Health</h1>
         <div className="grid gap-4 sm:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-lg" />)}
         </div>
@@ -70,7 +70,7 @@ export default function PlanningInsights() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Planning</h1>
+      <h1 className="text-2xl font-bold">Planning Health</h1>
 
       {/* Summary stats */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

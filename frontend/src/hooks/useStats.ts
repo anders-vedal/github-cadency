@@ -3,6 +3,7 @@ import { apiFetch } from '@/utils/api'
 import type {
   BenchmarkGroupResponse,
   BenchmarksV2Response,
+  CICheckFailuresResponse,
   CIStatsResponse,
   CodeChurnResponse,
   CollaborationPairDetail,
@@ -311,6 +312,24 @@ export function useCIStats(
   return useQuery<CIStatsResponse>({
     queryKey: ['ci-stats', dateFrom, dateTo, repoId],
     queryFn: () => apiFetch(`/stats/ci?${params}`),
+  })
+}
+
+export function useCheckFailures(
+  checkName: string | null,
+  dateFrom?: string,
+  dateTo?: string,
+  repoId?: number | null,
+) {
+  const params = new URLSearchParams()
+  if (checkName) params.set('check_name', checkName)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  if (repoId) params.set('repo_id', String(repoId))
+  return useQuery<CICheckFailuresResponse>({
+    queryKey: ['ci-check-failures', checkName, dateFrom, dateTo, repoId],
+    queryFn: () => apiFetch(`/stats/ci/check-failures?${params}`),
+    enabled: !!checkName,
   })
 }
 

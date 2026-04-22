@@ -13,6 +13,7 @@ from app.schemas.schemas import (
     BenchmarkGroupResponse,
     BenchmarkGroupUpdate,
     BenchmarksV2Response,
+    CICheckFailuresResponse,
     CIStatsResponse,
     CodeChurnResponse,
     DORAMetricsResponse,
@@ -47,6 +48,7 @@ from app.services.stats import (
     get_benchmark_groups,
     get_benchmarks_v2,
     update_benchmark_group,
+    get_check_failure_details,
     get_ci_stats,
     get_code_churn,
     get_dora_metrics,
@@ -346,6 +348,21 @@ async def ci_stats(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_ci_stats(db, date_from, date_to, repo_id)
+
+
+@router.get("/stats/ci/check-failures", response_model=CICheckFailuresResponse)
+async def ci_check_failures(
+    check_name: str = Query(..., min_length=1, max_length=255),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    repo_id: int | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_check_failure_details(
+        db, check_name, date_from, date_to, repo_id, limit
+    )
 
 
 @router.get("/stats/dora", response_model=DORAMetricsResponse)

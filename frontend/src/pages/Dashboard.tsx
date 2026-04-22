@@ -11,6 +11,7 @@ import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
 import StalePRsSection from '@/components/StalePRsSection'
 import LinearUsageHealthCard from '@/components/linear-health/LinearUsageHealthCard'
+import MetricsUsageBanner from '@/components/MetricsUsageBanner'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -191,6 +192,8 @@ export default function Dashboard() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Dashboard</h1>
 
+      <MetricsUsageBanner />
+
       {/* Zone 1: Compact alert summary bar */}
       <AlertSummaryBar />
 
@@ -296,6 +299,16 @@ export default function Dashboard() {
               subtitle={`${stats.total_merged} merged`}
               trend={trend('total_prs')}
               tooltip="Total pull requests opened across the team in this period"
+              pairedOutcome={
+                stats.merge_rate != null
+                  ? {
+                      label: 'Merge rate',
+                      value: `${(stats.merge_rate * 100).toFixed(1)}%`,
+                      tooltip:
+                        'Activity metrics pair with an outcome metric so throughput can be read next to quality.',
+                    }
+                  : undefined
+              }
             />
             <StatCard
               title="Merge Rate"
@@ -330,6 +343,16 @@ export default function Dashboard() {
               value={stats.total_reviews}
               trend={trend('total_reviews')}
               tooltip="Total PR reviews submitted across the team (approved, changes requested, or comments)"
+              pairedOutcome={
+                stats.avg_time_to_first_review_hours != null
+                  ? {
+                      label: 'Time to first review',
+                      value: `${stats.avg_time_to_first_review_hours.toFixed(1)}h`,
+                      tooltip:
+                        'Review volume is only meaningful when paired with responsiveness — lots of reviews that arrive late are still a flow problem.',
+                    }
+                  : undefined
+              }
             />
             <StatCard
               title="Issues Closed"

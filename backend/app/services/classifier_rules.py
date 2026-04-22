@@ -19,6 +19,7 @@ from app.services.incident_classification import (
     IncidentRule,
     default_rules as default_incident_rules,
 )
+from app.services.work_categories import _validate_regex_safe
 
 RuleKind = Literal["incident", "ai_reviewer", "ai_author"]
 VALID_KINDS: tuple[RuleKind, ...] = ("incident", "ai_reviewer", "ai_author")
@@ -30,15 +31,48 @@ VALID_INCIDENT_RULE_TYPES = {
     "github_label",
     "linear_label",
     "linear_issue_type",
+    "direct_push_no_review",
 }
 VALID_AI_RULE_TYPES = {"username", "label", "email_pattern"}
+
+# Rule types that compile ``pattern`` as a regex at match time. Only these
+# values get the ReDoS guard; substring / label-match rule types just need
+# the length cap. Keep this list in sync if new regex-backed rule types land.
+REGEX_RULE_TYPES = {"email_pattern"}
+
+# Hard cap on pattern length — prevents pathological inputs regardless of
+# rule_type. 200 chars covers every realistic label/prefix/regex we ship
+# with defaults and matches the bound used elsewhere for admin-editable
+# free text.
+MAX_PATTERN_LENGTH = 200
 
 
 class ValidationError(ValueError):
     """Raised when a caller provides an invalid rule shape."""
 
 
-def _validate(kind: str, rule_type: str) -> None:
+def _validate_pattern(rule_type: str, pattern: str | None) -> None:
+    """Length + (for regex rule_types) ReDoS guard on admin-editable patterns.
+
+    Today only ``email_pattern`` compiles the stored value as a regex, but the
+    same validator runs unconditionally on length so adding a future regex
+    rule_type doesn't reopen this door. Safe patterns pass; unsafe patterns
+    raise :class:`ValidationError`.
+    """
+    text = pattern or ""
+    if len(text) > MAX_PATTERN_LENGTH:
+        raise ValidationError(
+            f"Pattern exceeds {MAX_PATTERN_LENGTH} characters "
+            f"(got {len(text)}). Shorten it or split across multiple rules."
+        )
+    if rule_type in REGEX_RULE_TYPES:
+        try:
+            _validate_regex_safe(text)
+        except ValueError as exc:
+            raise ValidationError(f"Unsafe regex pattern: {exc}") from exc
+
+
+def _validate(kind: str, rule_type: str, pattern: str | None = None) -> None:
     if kind not in VALID_KINDS:
         raise ValidationError(f"Unknown kind {kind!r}; expected one of {VALID_KINDS}")
     if kind == "incident":
@@ -51,6 +85,7 @@ def _validate(kind: str, rule_type: str) -> None:
             raise ValidationError(
                 f"AI rule_type must be one of {sorted(VALID_AI_RULE_TYPES)}"
             )
+    _validate_pattern(rule_type, pattern)
 
 
 async def list_rules(
@@ -79,7 +114,7 @@ async def create_rule(
     priority: int = 100,
     enabled: bool = True,
 ) -> ClassifierRule:
-    _validate(kind, rule_type)
+    _validate(kind, rule_type, pattern)
     if kind == "incident" and not (is_hotfix or is_incident):
         raise ValidationError(
             "Incident rules must set is_hotfix=True or is_incident=True (or both)"
@@ -122,6 +157,7 @@ async def update_rule(
     if not row:
         return None
     if pattern is not None:
+        _validate_pattern(row.rule_type, pattern)
         row.pattern = pattern
     if is_hotfix is not None:
         row.is_hotfix = is_hotfix

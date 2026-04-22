@@ -15,6 +15,7 @@ import { useDevelopers } from '@/hooks/useDevelopers'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import ErrorCard from '@/components/ErrorCard'
+import MetricsUsageBanner from '@/components/MetricsUsageBanner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -216,6 +217,7 @@ export default function ExecutiveDashboard() {
 
   return (
     <div className="space-y-8">
+      <MetricsUsageBanner />
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-bold">Executive Dashboard</h1>
         <Tooltip>

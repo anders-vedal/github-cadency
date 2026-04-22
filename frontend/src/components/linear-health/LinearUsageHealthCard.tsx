@@ -177,8 +177,11 @@ export default function LinearUsageHealthCard() {
           to="/insights/conversations"
         />
 
-        {/* Creator outcome — a bit different; renders mini-table inline */}
-        <div className="-mx-2 rounded-md px-2 py-2">
+        {/* Creator outcome — drills into issue-quality for the creator breakdown. */}
+        <Link
+          to="/insights/issue-quality"
+          className="-mx-2 block rounded-md px-2 py-2 transition-colors hover:bg-muted/50"
+        >
           <div className="flex items-start gap-3">
             <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted">
               <GitPullRequest className="h-3.5 w-3.5" />
@@ -195,7 +198,7 @@ export default function LinearUsageHealthCard() {
               <CreatorOutcomeMiniTable creators={creator_outcome.top_creators} />
             </div>
           </div>
-        </div>
+        </Link>
       </CardContent>
     </Card>
   )

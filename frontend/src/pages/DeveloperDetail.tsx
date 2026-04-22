@@ -587,7 +587,10 @@ export default function DeveloperDetail() {
         </div>
       )}
 
-      {isLinearPrimary && (isAdmin || isOwnPage) && (
+      {/* Worker is peer-visible per spec — any authenticated user can see how
+          anyone works when Linear is primary. Creator + Shepherd above/below
+          remain gated to self-or-admin. */}
+      {isLinearPrimary && (
         <div className="space-y-3">
           <h2 className="text-lg font-semibold">Linear worker</h2>
           <p className="text-sm text-muted-foreground">
@@ -632,6 +635,16 @@ export default function DeveloperDetail() {
             value={stats.prs_opened}
             subtitle={`${stats.prs_merged} merged`}
             tooltip="Number of pull requests you authored in this period"
+            pairedOutcome={
+              stats.prs_opened > 0
+                ? {
+                    label: 'Merge rate',
+                    value: `${Math.round((stats.prs_merged / stats.prs_opened) * 100)}%`,
+                    tooltip:
+                      'PR count alone is an activity metric — the merge rate is the paired outcome that keeps the reader honest about whether volume became shipped work.',
+                  }
+                : undefined
+            }
           />
           <StatCard
             title="PRs Open"

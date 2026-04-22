@@ -1389,9 +1389,24 @@ CI/CD check-run analysis across all repos or scoped to a single repo. **Admin on
   "avg_checks_to_green": 1.4,
   "flaky_checks": [
     {
+      "name": "test-migrations",
+      "failure_rate": 1.0,
+      "total_runs": 6,
+      "category": "broken",
+      "last_run_at": "2026-04-18T09:14:22Z",
+      "failure_rate_first_half": 1.0,
+      "failure_rate_second_half": 1.0,
+      "trend": "stable"
+    },
+    {
       "name": "integration-tests",
       "failure_rate": 0.182,
-      "total_runs": 22
+      "total_runs": 22,
+      "category": "flaky",
+      "last_run_at": "2026-04-22T07:02:11Z",
+      "failure_rate_first_half": 0.1,
+      "failure_rate_second_half": 0.273,
+      "trend": "rising"
     }
   ],
   "avg_build_duration_s": 245.3,
@@ -1412,9 +1427,54 @@ CI/CD check-run analysis across all repos or scoped to a single repo. **Admin on
 |-------|-------------|
 | `prs_merged_with_failing_checks` | Count of merged PRs that had at least one check run with `conclusion="failure"` |
 | `avg_checks_to_green` | Average number of `run_attempt` values before a check passed. `null` if no successful checks exist |
-| `flaky_checks` | Check names with >10% failure rate (minimum 5 runs). Sorted by failure rate descending |
+| `flaky_checks` | Check names with >10% failure rate. Sorted by failure rate descending. Each row has a `category` field: `"broken"` when failure rate ≥90% (likely abandoned or misconfigured jobs) or `"flaky"` when failure rate is 10–90% (likely intermittent failures). `last_run_at` is the most recent `started_at` (falling back to `completed_at`) across the check's runs in the window, or `null` if no timestamps are stored — used client-side to hide stale rows by default. `failure_rate_first_half` / `failure_rate_second_half` split the window at its midpoint and report the per-half failure rate; both are `null` when either half has fewer than 3 runs. `trend` is one of `"rising"` (second-half rate ≥ 0.10 above first-half), `"falling"` (first-half rate ≥ 0.10 above second-half), `"stable"`, or `null` (sample too small). |
 | `avg_build_duration_s` | Mean duration in seconds across all check runs with timing data. `null` if no duration data |
 | `slowest_checks` | Top 5 check names ranked by average duration, descending |
+
+---
+
+### GET /api/stats/ci/check-failures
+
+Drill-down list of PRs whose runs of a specific check have failed in the window. Consumed by the row-click modal on the CI Check Health card. **Admin only.**
+
+**Query Parameters:**
+
+| Name | Type | Required | Default | Notes |
+|------|------|----------|---------|-------|
+| `check_name` | string (1–255) | Yes | — | Exact check name from the flaky/broken list |
+| `date_from` | datetime | No | last 30 days | |
+| `date_to` | datetime | No | now | |
+| `repo_id` | int | No | all tracked | |
+| `limit` | int (1–500) | No | 50 | Cap on entries returned |
+
+**Response 200:**
+
+```json
+{
+  "check_name": "test-migrations",
+  "entries": [
+    {
+      "pr_number": 2042,
+      "pr_title": "Migrate user schema to v3",
+      "pr_html_url": "https://github.com/org/ci-repo/pull/2042",
+      "repo_full_name": "org/ci-repo",
+      "author_login": "octocat",
+      "author_avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+      "failed_at": "2026-04-22T06:18:04Z",
+      "run_html_url": "https://github.com/org/ci-repo/actions/runs/9911",
+      "run_attempt": 1,
+      "was_eventually_green": true
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `check_name` | Echoes the query param |
+| `entries` | List of failing runs ordered by `failed_at` descending, capped at `limit` |
+| `failed_at` | `coalesce(PRCheckRun.started_at, PRCheckRun.completed_at, PullRequest.created_at)` — never null |
+| `was_eventually_green` | `true` when the same PR has any later `PRCheckRun` for this check with `conclusion="success"` and `run_attempt >` this row's |
 
 ---
 
@@ -3968,6 +4028,12 @@ primary issue source — frontend treats this as "hide the card, don't show erro
 `status` values on each signal: `healthy` | `warning` | `critical`. Low-sample rows
 (`sample_size < 5`) should be badged in the UI.
 
+`median_comments_before_first_pr` is the median count of non-system comments whose
+`created_at <= first_linked_pr.created_at` for issues with at least one linked PR.
+Issues without a linked PR are excluded from the sample (we can't measure pre-PR
+clarification cost for them). `high_comment_issue_pct` remains based on total
+non-system comments across all issues in range.
+
 ### Phase 04 — Issue Conversations
 
 All endpoints require authentication (not admin-only). Date-range optional; defaults
@@ -3987,7 +4053,7 @@ Top-N issues by non-system comment count with filters.
 | `project_id` | `int` | null |
 | `creator_id` | `int` | null |
 | `assignee_id` | `int` | null |
-| `label` | `string` | null (exact-match on issue labels) |
+| `label` | `string` | null (exact-match on issue labels, applied in SQL before LIMIT) |
 | `priority` | `int` | null |
 | `has_linked_pr` | `bool` | null |
 
@@ -4081,6 +4147,13 @@ All require **self or admin** — 403 otherwise. Used by Developer Detail page.
 ```
 
 #### GET /api/developers/{developer_id}/linear-worker-profile
+
+**Auth:** any authenticated user (peer-visible when Linear is primary). Returns
+`409 Conflict` when Linear is not configured as the primary issue source.
+The `issues_worked` set is the union of issues started or completed in the
+window — long-lived issues created before the window but finished inside it
+are included (cycle time, triage-to-start, and self-picked% would under-count
+otherwise).
 
 **Response:** `200 OK`
 ```json
@@ -4278,13 +4351,30 @@ Cycle-time distribution with bimodality detection.
     "ai_authored": {"merges": 6, "rework_rate": 16.7, "share_pct": 2.1},
     "hybrid": {"merges": 4, "rework_rate": 25.0, "share_pct": 1.4}
   },
+  "cohort_filter_applied": {
+    "deployment_frequency": false,
+    "lead_time_hours": false,
+    "mttr_hours": false,
+    "change_failure_rate": false,
+    "rework_rate": true
+  },
   "date_from": "2026-03-22T...",
   "date_to": "2026-04-22T..."
 }
 ```
 
 Bands use DORA 2024 thresholds (elite/high/medium/low). Rework rate = % of merged PRs
-followed by another merged PR touching shared files within 7 days.
+followed by another merged PR touching shared files within 7 days. Files touched by
+more than 20 PRs in the window (lock files, package.json, i18n catalogs) are excluded
+from the rework self-join to prevent cartesian explosion on high-churn shared files.
+
+**Cohort filter semantics.** When `cohort != "all"`:
+- `stability.rework_rate` and its band are computed on the cohort's PR ids only
+- `cohorts` still shows all four cohorts for comparison
+- Deployment-based metrics (`throughput.*`, `stability.change_failure_rate`) stay unchanged
+  because Deployment rows carry no cohort signal
+- `cohort_filter_applied` is a per-key object the UI reads to badge the
+  deployment-based cards as "all PRs" rather than silently matching the cohort picker
 
 The existing `/api/stats/dora` endpoint is preserved unchanged; `/api/dora/v2` is additive.
 
@@ -4320,3 +4410,85 @@ plus the banned-metric list.
 
 `visibility_default`: `self` | `team` | `admin`. `category`: `throughput` | `stability` |
 `flow` | `dialogue` | `bottleneck` | `quality`. `goodhart_risk`: `low` | `medium` | `high`.
+
+Registry source: `backend/app/services/metric_spec.py`. Re-run
+`backend/scripts/generate_metrics_catalog.py` to regenerate `docs/metrics/catalog.md`
+after editing the registry.
+
+### Classifier Rules (Admin)
+
+Admin-editable rules layered on top of hard-coded defaults for incident/hotfix
+detection (DORA v2 stability) and AI-cohort classification. Rules ADD to defaults —
+they never replace them.
+
+#### GET /api/admin/classifier-rules?kind={incident|ai_reviewer|ai_author}
+
+**Auth:** admin only.
+
+**Response:** `200 OK`
+```json
+{
+  "rules": [
+    {
+      "id": 7,
+      "kind": "incident",
+      "rule_type": "linear_label",
+      "pattern": "sev-1",
+      "is_hotfix": false,
+      "is_incident": true,
+      "priority": 40,
+      "enabled": true,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+#### POST /api/admin/classifier-rules
+
+**Auth:** admin only.
+
+**Request body:**
+```json
+{
+  "kind": "incident",
+  "rule_type": "direct_push_no_review",
+  "pattern": "feat,fix,chore,docs",
+  "is_hotfix": false,
+  "is_incident": true,
+  "priority": 50,
+  "enabled": true
+}
+```
+
+Valid `rule_type` per kind:
+- `incident`: `pr_title_prefix`, `revert_detection`, `github_label`, `linear_label`, `linear_issue_type`, `direct_push_no_review`
+- `ai_reviewer`: `username`
+- `ai_author`: `label`, `email_pattern`
+
+Pattern validation: length-capped at 200 chars regardless of rule_type. Rule types
+in `REGEX_RULE_TYPES` (currently `email_pattern`) additionally run through a ReDoS
+guard that rejects nested quantifiers and unbounded repetition. Rejections return
+`400 Bad Request`. Incident rules must set at least one of `is_hotfix` or
+`is_incident` to `true`.
+
+`direct_push_no_review` fires when a commit landed on the default branch without
+an associated PR (the classifier caller passes `is_direct_push_to_main=True`) AND
+the commit subject doesn't start with any prefix in the rule's comma-separated
+`pattern`. Empty pattern falls back to the built-in allowlist
+(`feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `style`, `ci`, `build`, `perf`,
+`revert`).
+
+#### PATCH /api/admin/classifier-rules/{rule_id}
+
+**Auth:** admin only.
+
+**Request body:** any subset of `pattern`, `is_hotfix`, `is_incident`, `priority`,
+`enabled`. Pattern updates re-run the length + ReDoS validation; rejections return
+`400 Bad Request`.
+
+#### DELETE /api/admin/classifier-rules/{rule_id}
+
+**Auth:** admin only. `204 No Content` on success, `404 Not Found` if the rule is
+missing.

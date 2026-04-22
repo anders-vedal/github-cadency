@@ -7,7 +7,7 @@ signals by default.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import String, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import (
@@ -74,16 +74,22 @@ async def get_chattiest_issues(
         query = query.where(ExternalIssue.assignee_developer_id == assignee_id)
     if priority is not None:
         query = query.where(ExternalIssue.priority == priority)
+    if label:
+        # Cast-to-string + LIKE is the portable containment check — works on
+        # PostgreSQL (JSONB → text) and SQLite (JSON → TEXT). Using the JSONB
+        # `.contains()` operator would emit `@>` which SQLite can't parse, so
+        # we can't use it even though it's the "correct" PostgreSQL idiom.
+        # The surrounding quotes ensure we don't partial-match another label.
+        # Applied in SQL so label-matching happens before LIMIT; otherwise the
+        # top-N slice could exclude labelled issues further down the list.
+        query = query.where(
+            cast(ExternalIssue.labels, String).like(f'%"{label}"%')
+        )
 
     rows = (await db.execute(query)).all()
 
     results: list[dict] = []
     for issue, count, participants in rows:
-        if label:
-            labels = issue.labels or []
-            if label not in labels:
-                continue
-
         creator_name = None
         if issue.creator_developer_id:
             dev = await db.get(Developer, issue.creator_developer_id)
